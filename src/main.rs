@@ -3,17 +3,11 @@ use std::{
     sync::Arc,
     thread,
 };
-use tokio::{select, signal::unix::{SignalKind, signal}, sync::mpsc, task::JoinHandle};
+use tokio::{select, sync::mpsc, task::JoinHandle};
 
-use crate::links::{LinkError, LocalhostResolver, perfect_link::PerfectLink};
+use crate::links::{LinkError, LocalhostResolver, perfect_link::PerfectLink, signals};
 
 pub mod links;
-
-fn print_msg(raw: &[u8]) -> Result<(), LinkError> {
-    let msg = str::from_utf8(raw).map_err(|e| LinkError::MessageError(e.to_string()))?;
-    println!("{}", msg);
-    Ok(())
-}
 
 #[tokio::main]
 async fn main() {
@@ -25,27 +19,21 @@ async fn main() {
 
     let base_port = args[1].parse::<u16>().expect("Invalid base port");
     let local_rank = args[2].parse::<u16>().expect("Invalid local rank");
-    let n_peers = args[3].parse::<u16>().expect("Invalid number of peers");
+    // let n_peers = args[3].parse::<u16>().expect("Invalid number of peers");
 
     let addr = format!("localhost:{}", base_port + local_rank);
     println!("Listening on: {addr}");
 
-    let link = PerfectLink::new(
-        local_rank,
-        Box::new(LocalhostResolver { base_port }),
-        Arc::new(print_msg),
-        None,
-    )
-    .await
-    .expect("Creating link");
+    let link = PerfectLink::new(local_rank, Box::new(LocalhostResolver { base_port }), None)
+        .await
+        .expect("Creating link");
 
     let link = Arc::new(link);
-    let link_cpy = Arc::clone(&link);
-    let listen_handle = tokio::spawn(async move {
-        link_cpy.listen().await
-    });
-    let (tx, mut rx) = mpsc::channel::<(u16, String)>(32);
 
+    let link_cpy = Arc::clone(&link);
+    let listen_handle = tokio::spawn(async move { link_cpy.listen().await });
+
+    let (tx, mut rx) = mpsc::channel::<(u16, String)>(32);
     thread::spawn(move || {
         loop {
             print!("Enter recipient's rank: ");
@@ -56,15 +44,15 @@ async fn main() {
                 println!("Error reading user input: {:?}", e)
             }
 
-            let recipient: u16;
-            match input.trim().parse::<u16>() {
+            let recipient: u16 = match input.trim().parse::<u16>() {
                 Err(e) => {
                     println!("Invalid recipient: {input}.{:?}", e);
                     continue;
                 }
-                Ok(n) => recipient = n,
-            }
+                Ok(n) => n,
+            };
 
+            input.clear();
             print!("Enter message for {recipient}: ");
             stdout().flush().unwrap();
             if let Err(e) = stdin().read_line(&mut input) {
@@ -78,30 +66,27 @@ async fn main() {
         }
     });
 
+    let link_cpy = Arc::clone(&link);
     let send_handle: JoinHandle<Result<(), LinkError>> = tokio::spawn(async move {
-        let mut shutting_down = false;
-        let mut sigterm = signal(SignalKind::terminate()).expect("creating sigterm receiver");
-        let mut sigtint = signal(SignalKind::interrupt()).expect("creating sigint receiver");
+        let (mut sigint, mut sigterm) = signals();
 
-        while !shutting_down {
+        loop {
             select!(
                 received = rx.recv() => {
                     match received {
                         None => return Ok(()),
                         Some((recipient, msg)) => {
-                            link.send(msg.trim().as_bytes(), recipient).await?;
+                            link_cpy.send(msg.trim().as_bytes(), recipient).await?;
                         }
                     }
                 }
 
                 _ = sigterm.recv() => {
-                    println!("Aborting listen_handle");
-                    shutting_down = true;
+                    break
                 }
 
-                _ = sigtint.recv() => {
-                    println!("Aborting listen_handle");
-                    shutting_down = true;
+                _ = sigint.recv() => {
+                    break
                 }
             )
         }
@@ -109,11 +94,41 @@ async fn main() {
         Ok(())
     });
 
+    let mut indications = link.indications.lock().await;
+    let (mut sigint, mut sigterm) = signals();
+    loop {
+        select! {
+            indications = indications.recv() => {
+                match indications {
+                    None => break,
+                    Some(sbl_deliver) => {
+                        println!(
+                            "\t\tMessage from {}: {}",
+                            sbl_deliver.sender,
+                            str::from_utf8(&sbl_deliver.message).unwrap_or("<Invalid Message>")
+                        );
+                    }
+                }
+            }
+
+            _ = sigterm.recv() => {
+                break;
+            }
+
+            _ = sigint.recv() => {
+                break;
+            }
+        }
+    }
+    println!("\nindication consumer stopped");
+
     if let Err(e) = send_handle.await.expect("Await send_handle") {
         println!("{:?}", e);
     }
+    println!("send_handle joined");
 
     if let Err(e) = listen_handle.await.expect("Await listen_handle") {
         println!("{:?}", e);
     }
+    println!("listen_handle joined");
 }

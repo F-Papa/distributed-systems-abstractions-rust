@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use tokio::signal::unix::{Signal, SignalKind, signal};
+
 pub mod fair_loss_link;
-pub mod stubborn_link;
 pub mod perfect_link;
+pub mod stubborn_link;
 
 const MAX_LENGTH: usize = 1000;
 
@@ -12,6 +14,13 @@ pub type Callback = Arc<dyn Fn(&[u8]) -> Result<(), LinkError> + Send + Sync>;
 pub enum LinkError {
     SocketError(String),
     MessageError(String),
+    InternalError(String),
+}
+
+pub fn signals() -> (Signal, Signal) {
+    let sigtterm = signal(SignalKind::interrupt()).expect("creating sigint receiver");
+    let sigtint = signal(SignalKind::interrupt()).expect("creating sigint receiver");
+    (sigtint, sigtterm)
 }
 
 pub trait Resolver<TPeer, TAddress>: Send + Sync {

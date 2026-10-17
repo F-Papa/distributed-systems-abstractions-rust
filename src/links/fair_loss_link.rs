@@ -1,27 +1,41 @@
-use tokio::{net::UdpSocket, select, signal::{unix::{signal, SignalKind}, ctrl_c}};
+use std::sync::Arc;
 
-use crate::links::{Callback, LinkError, MAX_LENGTH, Resolver};
+use tokio::{
+    net::UdpSocket,
+    select,
+    sync::{Mutex, mpsc},
+};
+
+use crate::links::{LinkError, MAX_LENGTH, Resolver, signals};
+
+pub struct FllDeliver<T> {
+    pub message: Arc<[u8]>,
+    pub sender: T,
+}
 
 pub struct FairLossLink<T> {
     pub socket: UdpSocket,
-    pub callback: Callback,
     pub resolver: Box<dyn Resolver<T, String>>,
+    pub indications: Arc<Mutex<mpsc::Receiver<FllDeliver<T>>>>,
+    indications_tx: Mutex<Option<mpsc::Sender<FllDeliver<T>>>>,
 }
 
 impl FairLossLink<u16> {
     pub async fn new(
         local_rank: u16,
         resolver: Box<dyn Resolver<u16, String>>,
-        callback: Callback,
     ) -> Result<Self, LinkError> {
         let socket = UdpSocket::bind(resolver.resolve(local_rank))
             .await
             .map_err(|e| LinkError::SocketError(e.to_string()))?;
 
+        let (tx, rx) = mpsc::channel::<FllDeliver<u16>>(32);
+
         let fll = FairLossLink {
             socket,
-            callback,
             resolver,
+            indications: Arc::from(Mutex::new(rx)),
+            indications_tx: Mutex::new(Some(tx)),
         };
 
         Ok(fll)
@@ -37,31 +51,39 @@ impl FairLossLink<u16> {
     }
 
     pub async fn listen(&self) -> Result<(), LinkError> {
-        let mut shutting_down = false;
-        while !shutting_down {
+        let (mut sigint, mut sigterm) = signals();
+
+        let mut indications_tx = self.indications_tx.lock().await;
+        loop {
             let mut buf = [0_u8; MAX_LENGTH];
-
-            let mut sigterm = signal(SignalKind::terminate()).expect("creating sigterm receiver");
-            let mut sigtint = signal(SignalKind::interrupt()).expect("creating sigint receiver");
-
             select! {
                 _ = sigterm.recv() => {
-                    println!("Aborting listen_handle");
-                    shutting_down = true;
+                    break;
                 }
 
-                _ = sigtint.recv() => {
-                    println!("Aborting listen_handle");
-                    shutting_down = true;
+                _ = sigint.recv() => {
+                    break;
                 }
 
                 result = self.socket.recv(&mut buf) => {
-                    let len = result.map_err(|e| LinkError::SocketError(e.to_string()))?;
-                    (self.callback)(&buf[..len])?;
+                    result.map_err(|e| LinkError::SocketError(e.to_string()))?;
                 }
             }
+
+            let indication = FllDeliver {
+                message: Arc::from(buf),
+                sender: 0_u16,
+            };
+
+            indications_tx
+                .as_ref()
+                .expect("get indications_tx")
+                .send(indication)
+                .await
+                .map_err(|e| LinkError::InternalError(e.to_string()))?;
         }
 
+        *indications_tx = None;
         Ok(())
     }
 }
