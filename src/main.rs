@@ -35,20 +35,21 @@ async fn main() {
     .unwrap();
 
     let link = Arc::new(link);
-    let listen_handle = tokio::spawn(Arc::clone(&link).listen());
+    let link_cpy = Arc::clone(&link);
+    let listen_handle = tokio::spawn(async move { link_cpy.listen().await });
 
     for i in 1..n_peers + 1 {
         if i == local_rank {
             continue;
         }
-        _ = Arc::clone(&link).send("Hello".as_bytes(), i).await;
+        _ = link.send("Hello".as_bytes(), i).await;
     }
 
     for i in 1..n_peers + 1 {
         if i == local_rank {
             continue;
         }
-        _ = Arc::clone(&link).send("Bye".as_bytes(), i).await;
+        _ = link.send("Bye".as_bytes(), i).await;
     }
 
     if let Err(e) = listen_handle.await.expect("Await listen_handle") {

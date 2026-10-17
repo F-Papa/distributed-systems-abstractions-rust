@@ -19,7 +19,7 @@ impl StubbornLink<u16> {
         resolver: Box<dyn Resolver<u16, String>>,
         callback: Callback,
     ) -> Result<Self, LinkError> {
-        let fair_loss_link = FairLossLink::new(local_rank, resolver, Arc::clone(&callback)).await?;
+        let fair_loss_link = FairLossLink::new(local_rank, resolver, callback).await?;
 
         let stubborn_link = StubbornLink {
             fair_loss_link: Arc::new(fair_loss_link),
@@ -34,7 +34,7 @@ impl StubbornLink<u16> {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 let mut messages: Option<Vec<OutboxEntry>> = None;
 
-                if let Ok(outbox) = Arc::clone(&outbox_copy).lock() {
+                if let Ok(outbox) = &outbox_copy.lock() {
                     messages = Some(outbox.iter().map(|(a, b)| (*a, Arc::clone(&b))).collect());
                 }
 
@@ -42,7 +42,7 @@ impl StubbornLink<u16> {
                     None => return,
                     Some(messages) => {
                         for (peer_rank, msg) in messages.iter() {
-                            if let Err(e) = Arc::clone(&fll_copy).send(msg, *peer_rank).await {
+                            if let Err(e) = fll_copy.send(msg, *peer_rank).await {
                                 println!("Error sending message: {:?}", e);
                             }
                         }
