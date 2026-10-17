@@ -30,9 +30,10 @@ async fn main() {
         local_rank,
         Box::new(LocalhostResolver { base_port }),
         Arc::new(print_msg),
+        None,
     )
     .await
-    .unwrap();
+    .expect("Creating link");
 
     let link = Arc::new(link);
     let link_cpy = Arc::clone(&link);

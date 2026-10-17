@@ -18,7 +18,9 @@ impl StubbornLink<u16> {
         local_rank: u16,
         resolver: Box<dyn Resolver<u16, String>>,
         callback: Callback,
+        retransmission_override: Option<Duration>,
     ) -> Result<Self, LinkError> {
+        const DEFAULT_RETRANSMISSION_SECS: u64 = 5;
         let fair_loss_link = FairLossLink::new(local_rank, resolver, callback).await?;
 
         let stubborn_link = StubbornLink {
@@ -31,20 +33,24 @@ impl StubbornLink<u16> {
 
         _ = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(
+                    retransmission_override
+                        .unwrap_or(Duration::from_secs(DEFAULT_RETRANSMISSION_SECS)),
+                )
+                .await;
+
                 let mut messages: Option<Vec<OutboxEntry>> = None;
 
-                if let Ok(outbox) = &outbox_copy.lock() {
-                    messages = Some(outbox.iter().map(|(a, b)| (*a, Arc::clone(&b))).collect());
+                {
+                    if let Ok(outbox) = &outbox_copy.lock() {
+                        messages = Some(outbox.iter().map(|(a, b)| (*a, Arc::clone(b))).collect());
+                    }
                 }
 
-                match messages {
-                    None => return,
-                    Some(messages) => {
-                        for (peer_rank, msg) in messages.iter() {
-                            if let Err(e) = fll_copy.send(msg, *peer_rank).await {
-                                println!("Error sending message: {:?}", e);
-                            }
+                if let Some(messages) = messages {
+                    for (peer_rank, msg) in messages.iter() {
+                        if let Err(e) = fll_copy.send(msg, *peer_rank).await {
+                            println!("Error sending message: {:?}", e);
                         }
                     }
                 }

@@ -1,11 +1,12 @@
 use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
+    collections::HashSet, sync::{Arc, Mutex}, time::Duration,
 };
 use uuid;
 
 use crate::links::stubborn_link::StubbornLink;
 use crate::links::{Callback, LinkError, Resolver};
+
+const UUID_LEN: usize = 16;
 
 pub struct PerfectLink<T> {
     pub stubborn_link: Arc<StubbornLink<T>>,
@@ -16,10 +17,11 @@ impl PerfectLink<u16> {
         local_rank: u16,
         resolver: Box<dyn Resolver<u16, String>>,
         callback: Callback,
+        retransmission_override: Option<Duration>
     ) -> Result<Self, LinkError> {
         let inbox = Arc::new(Mutex::new(HashSet::new()));
         let callback = internal_callback(Arc::clone(&inbox), callback);
-        let stubborn_link = StubbornLink::new(local_rank, resolver, callback).await?;
+        let stubborn_link = StubbornLink::new(local_rank, resolver, callback, retransmission_override).await?;
 
         let perfect_link = PerfectLink {
             stubborn_link: Arc::new(stubborn_link),
@@ -55,13 +57,6 @@ fn internal_callback(inbox: Arc<Mutex<HashSet<uuid::Uuid>>>, callback: Callback)
 }
 
 fn take_envelope(msg: &[u8]) -> Result<(uuid::Uuid, &[u8]), LinkError> {
-    const UUID_LEN: usize = 16;
-    if msg.len() < UUID_LEN {
-        return Err(LinkError::MessageError(format!(
-            "Message is shorter than {UUID_LEN}"
-        )));
-    }
-
     let (id_bytes, payload) = msg.split_at(UUID_LEN);
     let id_bytes: [u8; 16] = id_bytes
         .try_into()
