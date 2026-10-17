@@ -32,8 +32,8 @@ impl PerfectLink<u16> {
         self.stubborn_link.send(&add_envelope(msg), recipient).await
     }
 
-    pub async fn listen(self: Arc<Self>) -> Result<(), LinkError> {
-        Arc::clone(&self.stubborn_link).listen().await
+    pub async fn listen(&self) -> Result<(), LinkError> {
+        self.stubborn_link.listen().await
     }
 }
 

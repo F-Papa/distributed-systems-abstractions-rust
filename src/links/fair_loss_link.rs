@@ -38,7 +38,7 @@ impl FairLossLink<u16> {
         Ok(())
     }
 
-    pub async fn listen(self: Arc<Self>) -> Result<(), LinkError> {
+    pub async fn listen(&self) -> Result<(), LinkError> {
         loop {
             let mut buf = [0_u8; MAX_LENGTH];
             let len = self

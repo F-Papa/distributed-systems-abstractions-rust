@@ -60,14 +60,12 @@ impl StubbornLink<u16> {
             outbox.push_back((recipient, Arc::from(msg)));
         }
 
-        self.fair_loss_link
-            .send(msg, recipient)
-            .await?;
+        self.fair_loss_link.send(msg, recipient).await?;
 
         Ok(())
     }
 
-    pub async fn listen(self: Arc<Self>) -> Result<(), LinkError> {
-        Arc::clone(&self.fair_loss_link).listen().await
+    pub async fn listen(&self) -> Result<(), LinkError> {
+        self.fair_loss_link.listen().await
     }
 }
