@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tokio::net::UdpSocket;
 
 use crate::links::{Callback, LinkError, MAX_LENGTH, Resolver};
