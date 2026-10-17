@@ -15,6 +15,7 @@ pub enum LinkError {
     SocketError(String),
     MessageError(String),
     InternalError(String),
+    LinkClosed(),
 }
 
 pub fn signals() -> (Signal, Signal) {

@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use tokio::{
-    net::UdpSocket, select, sync::{Mutex, Notify, mpsc},
+    net::UdpSocket,
+    select,
+    sync::{Mutex, Notify, mpsc},
 };
 
-use crate::links::{LinkError, MAX_LENGTH, Resolver, signals};
+use crate::links::{LinkError, MAX_LENGTH, Resolver};
 
 pub struct FllDeliver<T> {
     pub message: Arc<[u8]>,
@@ -17,7 +19,7 @@ pub struct FairLossLink<T> {
     pub indications: Arc<Mutex<mpsc::Receiver<FllDeliver<T>>>>,
     indications_tx: Mutex<Option<mpsc::Sender<FllDeliver<T>>>>,
     local_id: T,
-    shutdown: Arc<Notify>
+    shutdown: Arc<Notify>,
 }
 
 impl FairLossLink<u16> {
@@ -37,7 +39,7 @@ impl FairLossLink<u16> {
             indications: Arc::from(Mutex::new(rx)),
             indications_tx: Mutex::new(Some(tx)),
             local_id: local_rank,
-            shutdown: Arc::new(Notify::new())
+            shutdown: Arc::new(Notify::new()),
         };
 
         Ok(fll)
@@ -49,11 +51,16 @@ impl FairLossLink<u16> {
             .send_to(&self.add_envelope(msg), addr)
             .await
             .map_err(|e| LinkError::SocketError(e.to_string()))?;
+
         Ok(())
     }
 
     pub async fn listen(&self) -> Result<(), LinkError> {
         let mut indications_tx = self.indications_tx.lock().await;
+        if indications_tx.is_none() {
+            return Err(LinkError::LinkClosed());
+        }
+
         loop {
             let mut buf = [0_u8; MAX_LENGTH];
             select! {
