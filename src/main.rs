@@ -8,7 +8,6 @@ fn print_msg(raw: &[u8]) -> Result<(), LinkError> {
     let msg = str::from_utf8(raw).map_err(|e| LinkError::MessageError(e.to_string()))?;
     println!("{}", msg);
     Ok(())
-    // Err(ListenError::MessageError("Cagamos".to_owned()))
 }
 
 #[tokio::main]
