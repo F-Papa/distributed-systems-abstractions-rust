@@ -29,7 +29,7 @@ impl FairLossLink<u16> {
         Ok(fll)
     }
 
-    pub async fn send(self: Arc<Self>, msg: &[u8], recipient: u16) -> Result<(), LinkError> {
+    pub async fn send(&self, msg: &[u8], recipient: u16) -> Result<(), LinkError> {
         let addr = self.resolver.resolve(recipient);
         self.socket
             .send_to(msg, addr)

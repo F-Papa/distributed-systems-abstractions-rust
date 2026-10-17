@@ -54,18 +54,16 @@ impl StubbornLink<u16> {
         Ok(stubborn_link)
     }
 
-    pub async fn send(self: Arc<Self>, msg: &[u8], recipient: u16) -> Result<(), LinkError> {
+    pub async fn send(&self, msg: &[u8], recipient: u16) -> Result<(), LinkError> {
         {
             let mut outbox = self.outbox.lock().expect("Could not acquire outbox lock");
             outbox.push_back((recipient, Arc::from(msg)));
         }
 
-        &self.fair_loss_link
+        self.fair_loss_link
             .send(msg, recipient)
             .await?;
-        // Arc::clone(&self.fair_loss_link)
-        //     .send(msg, recipient)
-        //     .await?;
+
         Ok(())
     }
 
