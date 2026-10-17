@@ -18,6 +18,7 @@ pub struct FairLossLink<T> {
     pub resolver: Box<dyn Resolver<T, String>>,
     pub indications: Arc<Mutex<mpsc::Receiver<FllDeliver<T>>>>,
     indications_tx: Mutex<Option<mpsc::Sender<FllDeliver<T>>>>,
+    local_id: T,
 }
 
 impl FairLossLink<u16> {
@@ -36,6 +37,7 @@ impl FairLossLink<u16> {
             resolver,
             indications: Arc::from(Mutex::new(rx)),
             indications_tx: Mutex::new(Some(tx)),
+            local_id: local_rank,
         };
 
         Ok(fll)
@@ -44,7 +46,7 @@ impl FairLossLink<u16> {
     pub async fn send(&self, msg: &[u8], recipient: u16) -> Result<(), LinkError> {
         let addr = self.resolver.resolve(recipient);
         self.socket
-            .send_to(msg, addr)
+            .send_to(&self.add_envelope(msg), addr)
             .await
             .map_err(|e| LinkError::SocketError(e.to_string()))?;
         Ok(())
@@ -70,9 +72,11 @@ impl FairLossLink<u16> {
                 }
             }
 
+            let (id, payload) = self.take_envelope(&buf)?;
+
             let indication = FllDeliver {
-                message: Arc::from(buf),
-                sender: 0_u16,
+                message: Arc::from(payload),
+                sender: id,
             };
 
             indications_tx
@@ -85,5 +89,21 @@ impl FairLossLink<u16> {
 
         *indications_tx = None;
         Ok(())
+    }
+
+    fn add_envelope(&self, msg: &[u8]) -> Vec<u8> {
+        let mut result = Vec::with_capacity(2 + msg.len());
+        result.extend_from_slice(&self.local_id.to_be_bytes());
+        result.extend_from_slice(msg);
+        result
+    }
+
+    fn take_envelope<'a>(&self, msg: &'a [u8]) -> Result<(u16, &'a [u8]), LinkError> {
+        let (envelope, payload) = msg.split_at(2);
+        let id_bytes: [u8; 2] = envelope.try_into().map_err(|e| {
+            LinkError::MessageError(format!("Could not obtain sender rank: {:?}", e))
+        })?;
+
+        Ok((u16::from_be_bytes(id_bytes), payload))
     }
 }
