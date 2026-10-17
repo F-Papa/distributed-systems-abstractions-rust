@@ -94,8 +94,18 @@ async fn main() {
         Ok(())
     });
 
+    let link_cpy = Arc::clone(&link);
+
+    let signal_handle = tokio::spawn(async move {
+        let (mut sigint, mut sigterm) = signals();
+        select! {
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        };
+        link_cpy.close().await
+    });
+
     let mut indications = link.indications.lock().await;
-    let (mut sigint, mut sigterm) = signals();
     loop {
         select! {
             indications = indications.recv() => {
@@ -103,20 +113,12 @@ async fn main() {
                     None => break,
                     Some(sbl_deliver) => {
                         println!(
-                            "\t\tMessage from {}: {}",
+                            "\n\t\tMessage from {}: {}",
                             sbl_deliver.sender,
                             str::from_utf8(&sbl_deliver.message).unwrap_or("<Invalid Message>")
                         );
                     }
                 }
-            }
-
-            _ = sigterm.recv() => {
-                break;
-            }
-
-            _ = sigint.recv() => {
-                break;
             }
         }
     }
@@ -131,4 +133,7 @@ async fn main() {
         println!("{:?}", e);
     }
     println!("listen_handle joined");
+
+    signal_handle.await.expect("Await signal_handle");
+    println!("signal_handle joined");
 }

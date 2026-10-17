@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use tokio::{
-    net::UdpSocket,
-    select,
-    sync::{Mutex, mpsc},
+    net::UdpSocket, select, sync::{Mutex, Notify, mpsc},
 };
 
 use crate::links::{LinkError, MAX_LENGTH, Resolver, signals};
@@ -19,6 +17,7 @@ pub struct FairLossLink<T> {
     pub indications: Arc<Mutex<mpsc::Receiver<FllDeliver<T>>>>,
     indications_tx: Mutex<Option<mpsc::Sender<FllDeliver<T>>>>,
     local_id: T,
+    shutdown: Arc<Notify>
 }
 
 impl FairLossLink<u16> {
@@ -38,6 +37,7 @@ impl FairLossLink<u16> {
             indications: Arc::from(Mutex::new(rx)),
             indications_tx: Mutex::new(Some(tx)),
             local_id: local_rank,
+            shutdown: Arc::new(Notify::new())
         };
 
         Ok(fll)
@@ -53,18 +53,12 @@ impl FairLossLink<u16> {
     }
 
     pub async fn listen(&self) -> Result<(), LinkError> {
-        let (mut sigint, mut sigterm) = signals();
-
         let mut indications_tx = self.indications_tx.lock().await;
         loop {
             let mut buf = [0_u8; MAX_LENGTH];
             select! {
-                _ = sigterm.recv() => {
-                    break;
-                }
-
-                _ = sigint.recv() => {
-                    break;
+                _ = self.shutdown.notified() => {
+                    break
                 }
 
                 result = self.socket.recv(&mut buf) => {
@@ -89,6 +83,10 @@ impl FairLossLink<u16> {
 
         *indications_tx = None;
         Ok(())
+    }
+
+    pub async fn close(&self) {
+        self.shutdown.notify_one();
     }
 
     fn add_envelope(&self, msg: &[u8]) -> Vec<u8> {

@@ -107,4 +107,8 @@ impl StubbornLink<u16> {
         *indications_tx = None;
         fll_handle.await.expect("join fll_handle")
     }
+
+    pub async fn close(&self) {
+        self.fair_loss_link.close().await;
+    }
 }

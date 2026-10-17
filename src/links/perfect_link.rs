@@ -12,7 +12,7 @@ pub type PlDeliver<T> = SblDeliver<T>;
 pub struct PerfectLink<T> {
     pub stubborn_link: Arc<StubbornLink<T>>,
     pub indications: Arc<Mutex<mpsc::Receiver<PlDeliver<T>>>>,
-    indications_tx: mpsc::Sender<PlDeliver<T>>,
+    indications_tx: Mutex<Option<mpsc::Sender<PlDeliver<T>>>>,
     sbl_indications: Arc<Mutex<mpsc::Receiver<SblDeliver<T>>>>,
     inbox: Arc<Mutex<HashSet<Uuid>>>,
 }
@@ -34,7 +34,7 @@ impl PerfectLink<u16> {
         let perfect_link = PerfectLink {
             stubborn_link: Arc::new(stubborn_link),
             indications: Arc::from(Mutex::from(rx)),
-            indications_tx: tx,
+            indications_tx: Mutex::from(Some(tx)),
             sbl_indications,
             inbox,
         };
@@ -52,6 +52,7 @@ impl PerfectLink<u16> {
 
         let mut inbox = self.inbox.lock().await;
         let mut sbl_indications = self.sbl_indications.lock().await;
+        let mut indications_tx = self.indications_tx.lock().await;
         loop {
             match sbl_indications.recv().await {
                 None => break,
@@ -66,15 +67,26 @@ impl PerfectLink<u16> {
                         sender: sbl_deliver.sender,
                     };
 
-                    if self.indications_tx.send(indication).await.is_err() {
+                    if indications_tx
+                        .as_ref()
+                        .expect("get indications_tx")
+                        .send(indication)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     inbox.insert(id);
                 }
             }
         }
+        *indications_tx = None;
 
         sbl_handle.await.expect("join sbl_handle")
+    }
+
+    pub async fn close(&self) {
+        self.stubborn_link.close().await
     }
 }
 
