@@ -1,4 +1,4 @@
-use tokio::net::UdpSocket;
+use tokio::{net::UdpSocket, select, signal::{unix::{signal, SignalKind}, ctrl_c}};
 
 use crate::links::{Callback, LinkError, MAX_LENGTH, Resolver};
 
@@ -37,15 +37,31 @@ impl FairLossLink<u16> {
     }
 
     pub async fn listen(&self) -> Result<(), LinkError> {
-        loop {
+        let mut shutting_down = false;
+        while !shutting_down {
             let mut buf = [0_u8; MAX_LENGTH];
-            let len = self
-                .socket
-                .recv(&mut buf)
-                .await
-                .map_err(|e| LinkError::SocketError(e.to_string()))?;
 
-            (self.callback)(&buf[..len])?;
+            let mut sigterm = signal(SignalKind::terminate()).expect("creating sigterm receiver");
+            let mut sigtint = signal(SignalKind::interrupt()).expect("creating sigint receiver");
+
+            select! {
+                _ = sigterm.recv() => {
+                    println!("Aborting listen_handle");
+                    shutting_down = true;
+                }
+
+                _ = sigtint.recv() => {
+                    println!("Aborting listen_handle");
+                    shutting_down = true;
+                }
+
+                result = self.socket.recv(&mut buf) => {
+                    let len = result.map_err(|e| LinkError::SocketError(e.to_string()))?;
+                    (self.callback)(&buf[..len])?;
+                }
+            }
         }
+
+        Ok(())
     }
 }
