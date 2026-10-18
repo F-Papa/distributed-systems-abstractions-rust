@@ -72,10 +72,12 @@ impl AuthPerfectLink {
                     }
 
                     let verifier = self.verifiers.get(&sbl_deliver.sender);
+                    let to_verify = [&id.as_bytes()[..], &payload].concat();
+
                     match verifier {
                         None => continue,
                         Some(verifier) => {
-                            if verifier.verify(payload, &signature).is_err() {
+                            if verifier.verify(&to_verify, &signature).is_err() {
                                 continue;
                             }
                         }
@@ -128,10 +130,16 @@ fn take_envelope(msg: &[u8]) -> Result<(uuid::Uuid, ed25519_dalek::Signature, &[
 
 fn add_envelope(msg: &[u8], key: &ed25519_dalek::SigningKey) -> Vec<u8> {
     let id = uuid::Uuid::new_v4().into_bytes();
-    let signature = key.sign(msg).to_bytes();
-    let mut result = Vec::with_capacity(id.len() + signature.len() + msg.len());
-    result.extend_from_slice(&id);
-    result.extend_from_slice(&signature);
-    result.extend_from_slice(msg);
-    result
+
+    let mut payload = Vec::with_capacity(id.len() + msg.len() + SIGNATURE_LEN);
+    payload.extend_from_slice(&id);
+    payload.extend_from_slice(msg);
+
+    let signature = key.sign(&payload).to_bytes();
+
+    payload.clear();
+    payload.extend_from_slice(&id);
+    payload.extend_from_slice(&signature);
+    payload.extend_from_slice(msg);
+    payload
 }
