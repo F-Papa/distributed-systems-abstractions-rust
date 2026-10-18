@@ -1,13 +1,14 @@
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use std::{
+    collections::HashMap,
     io::{Write, stdin, stdout},
     sync::Arc,
     thread,
 };
-use tokio::{select, sync::mpsc, task::JoinHandle};
+use tokio::{fs, select, sync::mpsc};
 
 use crate::links::{
-    LinkError, LocalhostResolver,
-    perfect_link::{PerfectLink, PlDeliver},
+    LinkError, LocalhostResolver, auth_perfect_link::AuthPerfectLink, perfect_link::PlDeliver,
     signals,
 };
 
@@ -23,14 +24,42 @@ async fn main() {
 
     let base_port = args[1].parse::<u16>().expect("Invalid base port");
     let local_rank = args[2].parse::<u16>().expect("Invalid local rank");
-    // let n_peers = args[3].parse::<u16>().expect("Invalid number of peers");
+    let n_peers = args[3].parse::<u16>().expect("Invalid number of peers");
 
     let addr = format!("localhost:{}", base_port + local_rank);
     println!("Listening on: {addr}");
 
-    let link = PerfectLink::new(local_rank, Box::new(LocalhostResolver { base_port }), None)
+    let signing_key: [u8; 32] = fs::read(format!("keys/node{local_rank}"))
         .await
-        .expect("Creating link");
+        .expect("reading private key")
+        .try_into()
+        .expect("casting private key into 32 bytes");
+
+    let signing_key = SigningKey::from_bytes(&signing_key);
+
+    let mut verifiers = HashMap::new();
+
+    for i in 1..n_peers + 1 {
+        let path = format!("keys/node{i}.pub");
+        let verifier = fs::read(&path)
+            .await
+            .expect(&path)
+            .try_into()
+            .expect("casting into 32 bytes");
+
+        let verifier = VerifyingKey::from_bytes(&verifier).expect(&format!("parsing verifier {i}"));
+        verifiers.insert(i, Arc::from(verifier));
+    }
+
+    let link = AuthPerfectLink::new(
+        local_rank,
+        Box::new(LocalhostResolver { base_port }),
+        None,
+        signing_key,
+        verifiers,
+    )
+    .await
+    .expect("Creating link");
 
     let link = Arc::new(link);
 
@@ -121,7 +150,7 @@ fn get_user_input(tx: mpsc::Sender<(u16, String)>) {
     }
 }
 
-async fn handle_signals(link: &PerfectLink<u16>) {
+async fn handle_signals(link: &AuthPerfectLink<u16>) {
     let (mut sigint, mut sigterm) = signals();
     select! {
         _ = sigterm.recv() => {}
@@ -131,7 +160,7 @@ async fn handle_signals(link: &PerfectLink<u16>) {
 }
 
 async fn consume_user_input(
-    link: &PerfectLink<u16>,
+    link: &AuthPerfectLink<u16>,
     mut rx: mpsc::Receiver<(u16, String)>,
 ) -> Result<(), LinkError> {
     let (mut sigint, mut sigterm) = signals();

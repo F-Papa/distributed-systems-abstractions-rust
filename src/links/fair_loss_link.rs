@@ -63,17 +63,17 @@ impl FairLossLink<u16> {
 
         loop {
             let mut buf = [0_u8; MAX_LENGTH];
-            select! {
+            let len = select! {
                 _ = self.shutdown.notified() => {
                     break
                 }
 
                 result = self.socket.recv(&mut buf) => {
-                    result.map_err(|e| LinkError::SocketError(e.to_string()))?;
+                    result.map_err(|e| LinkError::SocketError(e.to_string()))?
                 }
-            }
+            };
 
-            let (id, payload) = self.take_envelope(&buf)?;
+            let (id, payload) = self.take_envelope(&buf[..len])?;
 
             let indication = FllDeliver {
                 message: Arc::from(payload),

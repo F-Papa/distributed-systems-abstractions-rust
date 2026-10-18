@@ -42,10 +42,7 @@ impl PerfectLink<u16> {
         Ok(perfect_link)
     }
 
-    pub async fn send(&self, msg: &[u8], recipient: u16) -> Result<(), LinkError> {
-        self.stubborn_link.send(&add_envelope(msg), recipient).await
-    }
-
+    pub async fn send(&self, msg: &[u8], recipient: u16) -> Result<(), LinkError> { self.stubborn_link.send(&add_envelope(msg), recipient).await }
     pub async fn listen(&self) -> Result<(), LinkError> {
         let stubborn_link_cpy = Arc::clone(&self.stubborn_link);
         let sbl_handle = tokio::spawn(async move { stubborn_link_cpy.listen().await });
