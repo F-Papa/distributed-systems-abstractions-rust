@@ -1,6 +1,6 @@
 use std::{collections::LinkedList, sync::Arc, time::Duration};
 
-use log::error;
+use log::{debug, error};
 use tokio::{
     select,
     sync::{Mutex, Notify, mpsc},
@@ -104,6 +104,7 @@ impl StubbornLink {
     pub async fn listen(&self) -> Result<(), LinkError> {
         let fair_loss_link_cpy = Arc::clone(&self.fair_loss_link);
         tokio::try_join!(fair_loss_link_cpy.listen(), self.handle_indications())?;
+        debug!("finished");
         Ok(())
     }
 

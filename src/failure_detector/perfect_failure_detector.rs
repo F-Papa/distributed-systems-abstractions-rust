@@ -73,6 +73,7 @@ impl PerfectFailureDetector {
             self.handle_timeout(),
             self.handle_link_indications()
         )?;
+        debug!("finished");
 
         Ok(())
     }

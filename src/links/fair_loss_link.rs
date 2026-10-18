@@ -101,6 +101,7 @@ impl FairLossLink {
         }
 
         *indications_tx = None;
+        debug!("finished");
         Ok(())
     }
 

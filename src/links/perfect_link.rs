@@ -1,5 +1,5 @@
+use log::debug;
 use std::{collections::HashSet, sync::Arc, time::Duration};
-use log::warn;
 use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
@@ -48,6 +48,7 @@ impl PerfectLink {
     pub async fn listen(&self) -> Result<(), LinkError> {
         let stubborn_link_cpy = Arc::clone(&self.stubborn_link);
         tokio::try_join!(stubborn_link_cpy.listen(), self.handle_indications())?;
+        debug!("finished");
         Ok(())
     }
 
