@@ -8,7 +8,8 @@ use std::{
 use tokio::{fs, select, sync::mpsc};
 
 use crate::links::{
-    LinkError, LocalhostResolver, auth_perfect_link::AuthPerfectLink, perfect_link::PlDeliver,
+    LinkError, LocalhostResolver, NodeId,
+    auth_perfect_link::{AplDeliver, AuthPerfectLink},
     signals,
 };
 
@@ -23,10 +24,10 @@ async fn main() {
     );
 
     let base_port = args[1].parse::<u16>().expect("Invalid base port");
-    let local_rank = args[2].parse::<u16>().expect("Invalid local rank");
+    let local_rank = NodeId::new(args[2].parse::<u16>().expect("Invalid local rank"));
     let n_peers = args[3].parse::<u16>().expect("Invalid number of peers");
 
-    let addr = format!("localhost:{}", base_port + local_rank);
+    let addr = format!("localhost:{}", base_port + local_rank.get());
     println!("Listening on: {addr}");
 
     let signing_key: [u8; 32] = fs::read(format!("keys/node{local_rank}"))
@@ -40,6 +41,7 @@ async fn main() {
     let mut verifiers = HashMap::new();
 
     for i in 1..n_peers + 1 {
+        let peer = NodeId::new(i);
         let path = format!("keys/node{i}.pub");
         let verifier = fs::read(&path)
             .await
@@ -48,7 +50,7 @@ async fn main() {
             .expect("casting into 32 bytes");
 
         let verifier = VerifyingKey::from_bytes(&verifier).expect(&format!("parsing verifier {i}"));
-        verifiers.insert(i, Arc::from(verifier));
+        verifiers.insert(peer, Arc::from(verifier));
     }
 
     let link = AuthPerfectLink::new(
@@ -68,7 +70,7 @@ async fn main() {
     let listen_handle = tokio::spawn(async move { link_cpy.listen().await });
 
     // Send user input through mpsc::Sender
-    let (tx, rx) = mpsc::channel::<(u16, String)>(32);
+    let (tx, rx) = mpsc::channel::<(NodeId, String)>(32);
     thread::spawn(move || get_user_input(tx));
 
     // Create and send messages from mpsc::Receiver
@@ -99,7 +101,7 @@ async fn main() {
     println!("signal_handle joined");
 }
 
-async fn handle_indications(indications: &mut mpsc::Receiver<PlDeliver<u16>>) {
+async fn handle_indications(indications: &mut mpsc::Receiver<AplDeliver>) {
     loop {
         select! {
             indications = indications.recv() => {
@@ -118,7 +120,7 @@ async fn handle_indications(indications: &mut mpsc::Receiver<PlDeliver<u16>>) {
     }
 }
 
-fn get_user_input(tx: mpsc::Sender<(u16, String)>) {
+fn get_user_input(tx: mpsc::Sender<(NodeId, String)>) {
     loop {
         print!("Enter recipient's rank: ");
         stdout().flush().unwrap();
@@ -128,12 +130,12 @@ fn get_user_input(tx: mpsc::Sender<(u16, String)>) {
             println!("Error reading user input: {:?}", e)
         }
 
-        let recipient: u16 = match input.trim().parse::<u16>() {
+        let recipient = match input.trim().parse::<u16>() {
             Err(e) => {
                 println!("Invalid recipient: {input}.{:?}", e);
                 continue;
             }
-            Ok(n) => n,
+            Ok(n) => NodeId::new(n),
         };
 
         input.clear();
@@ -150,7 +152,7 @@ fn get_user_input(tx: mpsc::Sender<(u16, String)>) {
     }
 }
 
-async fn handle_signals(link: &AuthPerfectLink<u16>) {
+async fn handle_signals(link: &AuthPerfectLink) {
     let (mut sigint, mut sigterm) = signals();
     select! {
         _ = sigterm.recv() => {}
@@ -160,8 +162,8 @@ async fn handle_signals(link: &AuthPerfectLink<u16>) {
 }
 
 async fn consume_user_input(
-    link: &AuthPerfectLink<u16>,
-    mut rx: mpsc::Receiver<(u16, String)>,
+    link: &AuthPerfectLink,
+    mut rx: mpsc::Receiver<(NodeId, String)>,
 ) -> Result<(), LinkError> {
     let (mut sigint, mut sigterm) = signals();
     loop {

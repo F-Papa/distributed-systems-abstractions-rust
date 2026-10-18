@@ -5,35 +5,34 @@ use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
 use crate::links::stubborn_link::{SblDeliver, StubbornLink};
-use crate::links::{LinkError, Resolver};
+use crate::links::{LinkError, NodeId, Resolver};
 
 const UUID_LEN: usize = 16;
 const SIGNATURE_LEN: usize = 64;
 
-pub type AplDeliver<T> = SblDeliver<T>;
-pub struct AuthPerfectLink<T> {
-    pub stubborn_link: Arc<StubbornLink<T>>,
-    pub indications: Arc<Mutex<mpsc::Receiver<AplDeliver<T>>>>,
-    indications_tx: Mutex<Option<mpsc::Sender<AplDeliver<T>>>>,
-    sbl_indications: Arc<Mutex<mpsc::Receiver<SblDeliver<T>>>>,
+pub type AplDeliver = SblDeliver;
+pub struct AuthPerfectLink {
+    pub stubborn_link: Arc<StubbornLink>,
+    pub indications: Arc<Mutex<mpsc::Receiver<AplDeliver>>>,
+    indications_tx: Mutex<Option<mpsc::Sender<AplDeliver>>>,
+    sbl_indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
     inbox: Arc<Mutex<HashSet<Uuid>>>,
     signing_key: ed25519_dalek::SigningKey,
-    verifiers: HashMap<T, Arc<VerifyingKey>>,
+    verifiers: HashMap<NodeId, Arc<VerifyingKey>>,
 }
 
-impl AuthPerfectLink<u16> {
+impl AuthPerfectLink {
     pub async fn new(
-        local_rank: u16,
-        resolver: Box<dyn Resolver<u16, String>>,
+        local_id: NodeId,
+        resolver: Box<dyn Resolver>,
         retransmission_override: Option<Duration>,
         signing_key: ed25519_dalek::SigningKey,
-        verifiers: HashMap<u16, Arc<VerifyingKey>>,
+        verifiers: HashMap<NodeId, Arc<VerifyingKey>>,
     ) -> Result<Self, LinkError> {
-        let stubborn_link =
-            StubbornLink::new(local_rank, resolver, retransmission_override).await?;
+        let stubborn_link = StubbornLink::new(local_id, resolver, retransmission_override).await?;
         let sbl_indications = Arc::clone(&stubborn_link.indications);
 
-        let (tx, rx) = mpsc::channel::<AplDeliver<u16>>(32);
+        let (tx, rx) = mpsc::channel::<AplDeliver>(32);
 
         let inbox: Arc<Mutex<HashSet<Uuid>>> = Arc::new(Mutex::new(HashSet::new()));
 
@@ -50,7 +49,7 @@ impl AuthPerfectLink<u16> {
         Ok(perfect_link)
     }
 
-    pub async fn send(&self, msg: &[u8], recipient: u16) -> Result<(), LinkError> {
+    pub async fn send(&self, msg: &[u8], recipient: NodeId) -> Result<(), LinkError> {
         self.stubborn_link
             .send(&add_envelope(msg, &self.signing_key), recipient)
             .await

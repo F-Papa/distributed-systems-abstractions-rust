@@ -1,41 +1,42 @@
 use std::{collections::LinkedList, sync::Arc, time::Duration};
 
 use tokio::{
-    select, sync::{Mutex, Notify, mpsc}, task::JoinHandle,
+    select,
+    sync::{Mutex, Notify, mpsc},
+    task::JoinHandle,
 };
 
 use crate::links::{
-    LinkError, Resolver,
+    LinkError, NodeId, Resolver,
     fair_loss_link::{FairLossLink, FllDeliver},
 };
 
-type OutboxEntry = (u16, Arc<[u8]>);
+type OutboxEntry = (NodeId, Arc<[u8]>);
 
-pub type SblDeliver<T> = FllDeliver<T>;
+pub type SblDeliver = FllDeliver;
 
-pub struct StubbornLink<T> {
-    pub fair_loss_link: Arc<FairLossLink<T>>,
-    pub indications: Arc<Mutex<mpsc::Receiver<SblDeliver<T>>>>,
-    indications_tx: Mutex<Option<mpsc::Sender<SblDeliver<T>>>>,
-    fll_indications: Arc<Mutex<mpsc::Receiver<FllDeliver<T>>>>,
+pub struct StubbornLink {
+    pub fair_loss_link: Arc<FairLossLink>,
+    pub indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
+    indications_tx: Mutex<Option<mpsc::Sender<SblDeliver>>>,
+    fll_indications: Arc<Mutex<mpsc::Receiver<FllDeliver>>>,
     outbox: Arc<Mutex<LinkedList<OutboxEntry>>>,
     shutdown: Arc<Notify>,
-    retransmission_handle: Mutex<Option<JoinHandle<()>>>
+    retransmission_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl StubbornLink<u16> {
+impl StubbornLink {
     pub async fn new(
-        local_rank: u16,
-        resolver: Box<dyn Resolver<u16, String>>,
+        local_id: NodeId,
+        resolver: Box<dyn Resolver>,
         retransmission_override: Option<Duration>,
     ) -> Result<Self, LinkError> {
         const DEFAULT_RETRANSMISSION_SECS: u64 = 5;
 
-        let fair_loss_link = Arc::new(FairLossLink::new(local_rank, resolver).await?);
+        let fair_loss_link = Arc::new(FairLossLink::new(local_id, resolver).await?);
         let fll_indications = Arc::clone(&fair_loss_link.indications);
         let outbox = Arc::new(Mutex::new(LinkedList::new()));
         let shutdown = Arc::new(Notify::new());
-
 
         let fll_copy = Arc::clone(&fair_loss_link);
         let outbox_copy = Arc::clone(&outbox);
@@ -74,7 +75,7 @@ impl StubbornLink<u16> {
             }
         });
 
-        let (tx, rx) = mpsc::channel::<SblDeliver<u16>>(32);
+        let (tx, rx) = mpsc::channel::<SblDeliver>(32);
 
         let stubborn_link = StubbornLink {
             fair_loss_link,
@@ -83,13 +84,13 @@ impl StubbornLink<u16> {
             indications_tx: Mutex::from(Some(tx)),
             fll_indications,
             shutdown,
-            retransmission_handle: Mutex::new(Some(retransmission_handle))
+            retransmission_handle: Mutex::new(Some(retransmission_handle)),
         };
 
         Ok(stubborn_link)
     }
 
-    pub async fn send(&self, msg: &[u8], recipient: u16) -> Result<(), LinkError> {
+    pub async fn send(&self, msg: &[u8], recipient: NodeId) -> Result<(), LinkError> {
         self.fair_loss_link.send(msg, recipient).await?;
         self.outbox
             .lock()
@@ -124,7 +125,6 @@ impl StubbornLink<u16> {
         *indications_tx = None;
         fll_handle.await.expect("join fll_handle")
     }
-
     pub async fn close(&self) {
         self.fair_loss_link.close().await;
         self.shutdown.notify_one();

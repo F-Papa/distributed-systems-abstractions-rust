@@ -6,46 +6,43 @@ use tokio::{
     sync::{Mutex, Notify, mpsc},
 };
 
-use crate::links::{LinkError, MAX_LENGTH, Resolver};
+use crate::links::{LinkError, MAX_LENGTH, NodeId, Resolver};
 
-pub struct FllDeliver<T> {
+pub struct FllDeliver {
     pub message: Arc<[u8]>,
-    pub sender: T,
+    pub sender: NodeId,
 }
 
-pub struct FairLossLink<T> {
+pub struct FairLossLink {
     pub socket: UdpSocket,
-    pub resolver: Box<dyn Resolver<T, String>>,
-    pub indications: Arc<Mutex<mpsc::Receiver<FllDeliver<T>>>>,
-    indications_tx: Mutex<Option<mpsc::Sender<FllDeliver<T>>>>,
-    local_id: T,
+    pub resolver: Box<dyn Resolver>,
+    pub indications: Arc<Mutex<mpsc::Receiver<FllDeliver>>>,
+    indications_tx: Mutex<Option<mpsc::Sender<FllDeliver>>>,
+    local_id: NodeId,
     shutdown: Arc<Notify>,
 }
 
-impl FairLossLink<u16> {
-    pub async fn new(
-        local_rank: u16,
-        resolver: Box<dyn Resolver<u16, String>>,
-    ) -> Result<Self, LinkError> {
-        let socket = UdpSocket::bind(resolver.resolve(local_rank))
+impl FairLossLink {
+    pub async fn new(local_id: NodeId, resolver: Box<dyn Resolver>) -> Result<Self, LinkError> {
+        let socket = UdpSocket::bind(resolver.resolve(local_id))
             .await
             .map_err(|e| LinkError::SocketError(e.to_string()))?;
 
-        let (tx, rx) = mpsc::channel::<FllDeliver<u16>>(32);
+        let (tx, rx) = mpsc::channel::<FllDeliver>(32);
 
         let fll = FairLossLink {
             socket,
             resolver,
             indications: Arc::from(Mutex::new(rx)),
             indications_tx: Mutex::new(Some(tx)),
-            local_id: local_rank,
+            local_id,
             shutdown: Arc::new(Notify::new()),
         };
 
         Ok(fll)
     }
 
-    pub async fn send(&self, msg: &[u8], recipient: u16) -> Result<(), LinkError> {
+    pub async fn send(&self, msg: &[u8], recipient: NodeId) -> Result<(), LinkError> {
         let addr = self.resolver.resolve(recipient);
         self.socket
             .send_to(&self.add_envelope(msg), addr)
@@ -53,6 +50,10 @@ impl FairLossLink<u16> {
             .map_err(|e| LinkError::SocketError(e.to_string()))?;
 
         Ok(())
+    }
+
+    pub async fn close(&self) {
+        self.shutdown.notify_one();
     }
 
     pub async fn listen(&self) -> Result<(), LinkError> {
@@ -92,10 +93,6 @@ impl FairLossLink<u16> {
         Ok(())
     }
 
-    pub async fn close(&self) {
-        self.shutdown.notify_one();
-    }
-
     fn add_envelope(&self, msg: &[u8]) -> Vec<u8> {
         let mut result = Vec::with_capacity(2 + msg.len());
         result.extend_from_slice(&self.local_id.to_be_bytes());
@@ -103,12 +100,12 @@ impl FairLossLink<u16> {
         result
     }
 
-    fn take_envelope<'a>(&self, msg: &'a [u8]) -> Result<(u16, &'a [u8]), LinkError> {
-        let (envelope, payload) = msg.split_at(2);
-        let id_bytes: [u8; 2] = envelope.try_into().map_err(|e| {
+    fn take_envelope<'a>(&self, msg: &'a [u8]) -> Result<(NodeId, &'a [u8]), LinkError> {
+        let (envelope, payload) = msg.split_at(NodeId::ENCODED_LEN);
+        let id_bytes: [u8; NodeId::ENCODED_LEN] = envelope.try_into().map_err(|e| {
             LinkError::MessageError(format!("Could not obtain sender rank: {:?}", e))
         })?;
 
-        Ok((u16::from_be_bytes(id_bytes), payload))
+        Ok((NodeId::from_be_bytes(id_bytes), payload))
     }
 }

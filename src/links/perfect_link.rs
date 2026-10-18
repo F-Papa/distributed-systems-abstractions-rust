@@ -3,31 +3,30 @@ use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
 use crate::links::stubborn_link::{SblDeliver, StubbornLink};
-use crate::links::{LinkError, Resolver};
+use crate::links::{LinkError, NodeId, Resolver};
 
 const UUID_LEN: usize = 16;
 
-pub type PlDeliver<T> = SblDeliver<T>;
+pub type PlDeliver = SblDeliver;
 
-pub struct PerfectLink<T> {
-    pub stubborn_link: Arc<StubbornLink<T>>,
-    pub indications: Arc<Mutex<mpsc::Receiver<PlDeliver<T>>>>,
-    indications_tx: Mutex<Option<mpsc::Sender<PlDeliver<T>>>>,
-    sbl_indications: Arc<Mutex<mpsc::Receiver<SblDeliver<T>>>>,
+pub struct PerfectLink {
+    pub stubborn_link: Arc<StubbornLink>,
+    pub indications: Arc<Mutex<mpsc::Receiver<PlDeliver>>>,
+    indications_tx: Mutex<Option<mpsc::Sender<PlDeliver>>>,
+    sbl_indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
     inbox: Arc<Mutex<HashSet<Uuid>>>,
 }
 
-impl PerfectLink<u16> {
+impl PerfectLink {
     pub async fn new(
-        local_rank: u16,
-        resolver: Box<dyn Resolver<u16, String>>,
+        local_id: NodeId,
+        resolver: Box<dyn Resolver>,
         retransmission_override: Option<Duration>,
     ) -> Result<Self, LinkError> {
-        let stubborn_link =
-            StubbornLink::new(local_rank, resolver, retransmission_override).await?;
+        let stubborn_link = StubbornLink::new(local_id, resolver, retransmission_override).await?;
         let sbl_indications = Arc::clone(&stubborn_link.indications);
 
-        let (tx, rx) = mpsc::channel::<PlDeliver<u16>>(32);
+        let (tx, rx) = mpsc::channel::<PlDeliver>(32);
 
         let inbox: Arc<Mutex<HashSet<Uuid>>> = Arc::new(Mutex::new(HashSet::new()));
 
@@ -42,7 +41,9 @@ impl PerfectLink<u16> {
         Ok(perfect_link)
     }
 
-    pub async fn send(&self, msg: &[u8], recipient: u16) -> Result<(), LinkError> { self.stubborn_link.send(&add_envelope(msg), recipient).await }
+    pub async fn send(&self, msg: &[u8], recipient: NodeId) -> Result<(), LinkError> {
+        self.stubborn_link.send(&add_envelope(msg), recipient).await
+    }
     pub async fn listen(&self) -> Result<(), LinkError> {
         let stubborn_link_cpy = Arc::clone(&self.stubborn_link);
         let sbl_handle = tokio::spawn(async move { stubborn_link_cpy.listen().await });
@@ -56,6 +57,7 @@ impl PerfectLink<u16> {
                 Some(sbl_deliver) => {
                     let (id, payload) = take_envelope(&sbl_deliver.message)?;
                     if inbox.contains(&id) {
+                        println!("Key not found for peer {}", sbl_deliver.sender);
                         continue;
                     }
 
@@ -81,7 +83,6 @@ impl PerfectLink<u16> {
 
         sbl_handle.await.expect("join sbl_handle")
     }
-
     pub async fn close(&self) {
         self.stubborn_link.close().await
     }
