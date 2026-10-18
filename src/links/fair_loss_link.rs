@@ -25,7 +25,7 @@ pub struct FairLossLink {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Envelope {
+struct Envelope {
     sender: NodeId,
     recipient: NodeId,
     payload: Vec<u8>,
