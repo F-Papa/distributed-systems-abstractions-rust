@@ -7,6 +7,7 @@ use std::{
     thread,
 };
 use tokio::{fs, select, sync::mpsc};
+use tokio::try_join;
 
 use crate::{
     failure_detector::perfect_failure_detector::PerfectFailureDetector,
@@ -47,7 +48,7 @@ async fn main() {
     );
 
     let detector_cpy = Arc::clone(&detector);
-    let ind_handle = tokio::spawn(async move {
+    let handle_indications = async move {
         let mut indications = detector_cpy.indications.lock().await;
         loop {
             match indications.recv().await {
@@ -57,10 +58,11 @@ async fn main() {
                 }
             };
         }
-    });
 
-    detector.start().await;
-    ind_handle.await;
+        Ok(())
+    };
+
+    try_join!(detector.start(), handle_indications).unwrap();
 }
 
 async fn handle_indications(indications: &mut mpsc::Receiver<AplDeliver>) {

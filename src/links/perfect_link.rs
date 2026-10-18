@@ -47,8 +47,11 @@ impl PerfectLink {
     }
     pub async fn listen(&self) -> Result<(), LinkError> {
         let stubborn_link_cpy = Arc::clone(&self.stubborn_link);
-        let sbl_handle = tokio::spawn(async move { stubborn_link_cpy.listen().await });
+        tokio::try_join!(stubborn_link_cpy.listen(), self.handle_indications())?;
+        Ok(())
+    }
 
+    async fn handle_indications(&self) -> Result<(), LinkError> {
         let mut inbox = self.inbox.lock().await;
         let mut sbl_indications = self.sbl_indications.lock().await;
         let mut indications_tx = self.indications_tx.lock().await;
@@ -80,9 +83,9 @@ impl PerfectLink {
             }
         }
         *indications_tx = None;
-
-        sbl_handle.await.expect("join sbl_handle")
+        Ok(())
     }
+
     pub async fn close(&self) {
         self.stubborn_link.close().await
     }

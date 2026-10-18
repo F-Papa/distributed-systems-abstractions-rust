@@ -103,8 +103,11 @@ impl StubbornLink {
 
     pub async fn listen(&self) -> Result<(), LinkError> {
         let fair_loss_link_cpy = Arc::clone(&self.fair_loss_link);
-        let fll_handle = tokio::spawn(async move { fair_loss_link_cpy.listen().await });
+        tokio::try_join!(fair_loss_link_cpy.listen(), self.handle_indications())?;
+        Ok(())
+    }
 
+    async fn handle_indications(&self) -> Result<(), LinkError> {
         let mut indications_tx = self.indications_tx.lock().await;
         let mut fll_indications = self.fll_indications.lock().await;
         loop {
@@ -124,8 +127,9 @@ impl StubbornLink {
             }
         }
         *indications_tx = None;
-        fll_handle.await.expect("join fll_handle")
+        Ok(())
     }
+
     pub async fn close(&self) {
         self.fair_loss_link.close().await;
         self.shutdown.notify_one();
