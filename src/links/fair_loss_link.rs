@@ -110,6 +110,10 @@ impl FairLossLink {
     }
 
     fn take_envelope<'a>(&self, msg: &'a [u8]) -> Result<(NodeId, &'a [u8]), LinkError> {
+        if msg.len() < NodeId::ENCODED_LEN {
+            return Err(LinkError::MessageError("Message to short".to_owned()));
+        }
+
         let (envelope, payload) = msg.split_at(NodeId::ENCODED_LEN);
         let id_bytes: [u8; NodeId::ENCODED_LEN] = envelope.try_into().map_err(|e| {
             LinkError::MessageError(format!("Could not obtain sender rank: {:?}", e))
