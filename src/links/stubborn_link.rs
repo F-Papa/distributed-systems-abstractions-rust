@@ -1,6 +1,8 @@
 use std::{collections::LinkedList, sync::Arc, time::Duration};
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::{
+    select, sync::{Mutex, Notify, mpsc}, task::JoinHandle,
+};
 
 use crate::links::{
     LinkError, Resolver,
@@ -17,6 +19,8 @@ pub struct StubbornLink<T> {
     indications_tx: Mutex<Option<mpsc::Sender<SblDeliver<T>>>>,
     fll_indications: Arc<Mutex<mpsc::Receiver<FllDeliver<T>>>>,
     outbox: Arc<Mutex<LinkedList<OutboxEntry>>>,
+    shutdown: Arc<Notify>,
+    retransmission_handle: Mutex<Option<JoinHandle<()>>>
 }
 
 impl StubbornLink<u16> {
@@ -27,29 +31,30 @@ impl StubbornLink<u16> {
     ) -> Result<Self, LinkError> {
         const DEFAULT_RETRANSMISSION_SECS: u64 = 5;
 
-        let fair_loss_link = FairLossLink::new(local_rank, resolver).await?;
+        let fair_loss_link = Arc::new(FairLossLink::new(local_rank, resolver).await?);
         let fll_indications = Arc::clone(&fair_loss_link.indications);
+        let outbox = Arc::new(Mutex::new(LinkedList::new()));
+        let shutdown = Arc::new(Notify::new());
 
-        let (tx, rx) = mpsc::channel::<SblDeliver<u16>>(32);
 
-        let stubborn_link = StubbornLink {
-            fair_loss_link: Arc::new(fair_loss_link),
-            outbox: Arc::new(Mutex::new(LinkedList::new())),
-            indications: Arc::from(Mutex::new(rx)),
-            indications_tx: Mutex::from(Some(tx)),
-            fll_indications,
-        };
+        let fll_copy = Arc::clone(&fair_loss_link);
+        let outbox_copy = Arc::clone(&outbox);
+        let shutdown_cpy = Arc::clone(&shutdown);
 
-        let fll_copy = Arc::clone(&stubborn_link.fair_loss_link);
-        let outbox_copy = Arc::clone(&stubborn_link.outbox);
-
-        _ = tokio::spawn(async move {
+        let retransmission_handle = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(
-                    retransmission_override
-                        .unwrap_or(Duration::from_secs(DEFAULT_RETRANSMISSION_SECS)),
-                )
-                .await;
+                select! {
+                    _ = tokio::time::sleep(
+                        retransmission_override.unwrap_or(
+                            Duration::from_secs(DEFAULT_RETRANSMISSION_SECS)
+                        )
+                    ) => {}
+
+                    _ = shutdown_cpy.notified() => {
+                        break
+                    },
+
+                }
 
                 let messages: Vec<OutboxEntry>;
                 {
@@ -68,6 +73,18 @@ impl StubbornLink<u16> {
                 }
             }
         });
+
+        let (tx, rx) = mpsc::channel::<SblDeliver<u16>>(32);
+
+        let stubborn_link = StubbornLink {
+            fair_loss_link,
+            outbox,
+            indications: Arc::from(Mutex::new(rx)),
+            indications_tx: Mutex::from(Some(tx)),
+            fll_indications,
+            shutdown,
+            retransmission_handle: Mutex::new(Some(retransmission_handle))
+        };
 
         Ok(stubborn_link)
     }
@@ -110,5 +127,9 @@ impl StubbornLink<u16> {
 
     pub async fn close(&self) {
         self.fair_loss_link.close().await;
+        self.shutdown.notify_one();
+        if let Some(handle) = self.retransmission_handle.lock().await.take() {
+            handle.await.unwrap()
+        };
     }
 }
