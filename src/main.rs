@@ -14,6 +14,7 @@ use crate::links::{
 };
 
 pub mod links;
+pub mod crypto;
 
 #[tokio::main]
 async fn main() {
@@ -30,27 +31,13 @@ async fn main() {
     let addr = format!("localhost:{}", base_port + local_rank.get());
     println!("Listening on: {addr}");
 
-    let signing_key: [u8; 32] = fs::read(format!("keys/node{local_rank}"))
-        .await
-        .expect("reading private key")
-        .try_into()
-        .expect("casting private key into 32 bytes");
-
-    let signing_key = SigningKey::from_bytes(&signing_key);
+    let signing_key = crypto::get_signing_key(local_rank).expect("signing key");
 
     let mut verifiers = HashMap::new();
-
     for i in 1..n_peers + 1 {
-        let peer = NodeId::new(i);
-        let path = format!("keys/node{i}.pub");
-        let verifier = fs::read(&path)
-            .await
-            .expect(&path)
-            .try_into()
-            .expect("casting into 32 bytes");
-
-        let verifier = VerifyingKey::from_bytes(&verifier).expect(&format!("parsing verifier {i}"));
-        verifiers.insert(peer, Arc::from(verifier));
+        let node_id = NodeId::new(i);
+        let verifier = crypto::get_verifier(node_id).expect("verifier key");
+        verifiers.insert(node_id, Arc::from(verifier));
     }
 
     let link = AuthPerfectLink::new(
