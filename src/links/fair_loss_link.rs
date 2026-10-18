@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use log::debug;
 use tokio::{
     net::UdpSocket,
     select,
@@ -84,6 +85,7 @@ impl FairLossLink {
             };
 
             let (id, payload) = self.take_envelope(&buf[..len])?;
+            debug!("{:?} from {id}", payload);
 
             let indication = FllDeliver {
                 message: Arc::from(payload),

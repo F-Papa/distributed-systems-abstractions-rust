@@ -58,7 +58,6 @@ impl PerfectLink {
                 Some(sbl_deliver) => {
                     let (id, payload) = take_envelope(&sbl_deliver.message)?;
                     if inbox.contains(&id) {
-                        warn!("Key not found for peer {}", sbl_deliver.sender);
                         continue;
                     }
 
