@@ -1,5 +1,6 @@
 use std::{collections::LinkedList, sync::Arc, time::Duration};
 
+use log::error;
 use tokio::{
     select,
     sync::{Mutex, Notify, mpsc},
@@ -69,7 +70,7 @@ impl StubbornLink {
 
                 for (peer_rank, msg) in messages.iter() {
                     if let Err(e) = fll_copy.send(msg, *peer_rank).await {
-                        println!("Error sending message: {:?}", e);
+                        error!("Error sending message: {:?}", e);
                     }
                 }
             }

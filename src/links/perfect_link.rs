@@ -1,4 +1,5 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
+use log::warn;
 use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
@@ -57,7 +58,7 @@ impl PerfectLink {
                 Some(sbl_deliver) => {
                     let (id, payload) = take_envelope(&sbl_deliver.message)?;
                     if inbox.contains(&id) {
-                        println!("Key not found for peer {}", sbl_deliver.sender);
+                        warn!("Key not found for peer {}", sbl_deliver.sender);
                         continue;
                     }
 

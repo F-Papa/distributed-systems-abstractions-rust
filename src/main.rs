@@ -1,4 +1,5 @@
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use log::{debug, error, info, warn};
 use std::{
     collections::HashMap,
     io::{Write, stdin, stdout},
@@ -13,11 +14,14 @@ use crate::links::{
     signals,
 };
 
-pub mod links;
 pub mod crypto;
+pub mod links;
 
 #[tokio::main]
 async fn main() {
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info")).init();
+
     let args: Vec<String> = std::env::args().collect();
     assert!(
         args.len() == 4,
@@ -29,7 +33,7 @@ async fn main() {
     let n_peers = args[3].parse::<u16>().expect("Invalid number of peers");
 
     let addr = format!("localhost:{}", base_port + local_rank.get());
-    println!("Listening on: {addr}");
+    info!("Listening on: {addr}");
 
     let signing_key = crypto::get_signing_key(local_rank).expect("signing key");
 
@@ -71,21 +75,21 @@ async fn main() {
     // Handle link indications
     let mut indications = link.indications.lock().await;
     handle_indications(&mut *indications).await;
-    println!("\nindication consumer stopped");
+    debug!("\nindication consumer stopped");
 
     // Join Handles
     if let Err(e) = send_handle.await.expect("Await send_handle") {
-        println!("{:?}", e);
+        warn!("{:?}", e);
     }
-    println!("send_handle joined");
+    debug!("send_handle joined");
 
     if let Err(e) = listen_handle.await.expect("Await listen_handle") {
-        println!("{:?}", e);
+        warn!("{:?}", e);
     }
-    println!("listen_handle joined");
+    debug!("listen_handle joined");
 
     signal_handle.await.expect("Await signal_handle");
-    println!("signal_handle joined");
+    debug!("signal_handle joined");
 }
 
 async fn handle_indications(indications: &mut mpsc::Receiver<AplDeliver>) {
@@ -114,12 +118,12 @@ fn get_user_input(tx: mpsc::Sender<(NodeId, String)>) {
 
         let mut input = String::new();
         if let Err(e) = stdin().read_line(&mut input) {
-            println!("Error reading user input: {:?}", e)
+            error!("Error reading user input: {:?}", e)
         }
 
         let recipient = match input.trim().parse::<u16>() {
             Err(e) => {
-                println!("Invalid recipient: {input}.{:?}", e);
+                error!("Invalid recipient: {input}.{:?}", e);
                 continue;
             }
             Ok(n) => NodeId::new(n),
@@ -129,11 +133,11 @@ fn get_user_input(tx: mpsc::Sender<(NodeId, String)>) {
         print!("Enter message for {recipient}: ");
         stdout().flush().unwrap();
         if let Err(e) = stdin().read_line(&mut input) {
-            println!("Error reading user input: {:?}", e)
+            error!("Error reading user input: {:?}", e)
         }
 
         if let Err(e) = tx.blocking_send((recipient, input)) {
-            println!("Channel closed. Shutting down: {:?}", e);
+            error!("Channel closed. Shutting down: {:?}", e);
             return;
         }
     }
