@@ -8,6 +8,8 @@ ed25519-dalek = { version = "3", features = ["rand_core"] }
 getrandom = { version = "0.4", features = ["sys_rng"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 tokio = { version = "1.0", features = ["full"] }
-uuid = { version = "1.28.0", features = ["v4"] }
+uuid = { version = "1.28.0", features = ["v4", "serde"] }
 log = "0.4"
 env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

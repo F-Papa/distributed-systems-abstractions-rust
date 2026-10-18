@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use serde::{Deserialize, Serialize};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 pub mod auth_perfect_link;
@@ -19,7 +20,7 @@ pub enum LinkError {
     LinkClosed(),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(u16);
 
 impl NodeId {

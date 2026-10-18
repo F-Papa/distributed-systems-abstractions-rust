@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use log::debug;
+use serde::{Deserialize, Serialize};
 use tokio::{
     net::UdpSocket,
     select,
@@ -21,6 +22,13 @@ pub struct FairLossLink {
     indications_tx: Mutex<Option<mpsc::Sender<FllDeliver>>>,
     local_id: NodeId,
     shutdown: Arc<Notify>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Envelope {
+    sender: NodeId,
+    recipient: NodeId,
+    payload: Vec<u8>,
 }
 
 impl FairLossLink {
@@ -46,16 +54,25 @@ impl FairLossLink {
     pub async fn send(&self, msg: &[u8], recipient: NodeId) -> Result<(), LinkError> {
         let addr = self.resolver.resolve(recipient);
 
-        if msg.len() > MAX_LENGTH {
+        let envelope = Envelope {
+            sender: self.local_id,
+            recipient,
+            payload: msg.to_vec(),
+        };
+
+        let bytes =
+            serde_json::to_vec(&envelope).map_err(|e| LinkError::MessageError(e.to_string()))?;
+
+        if bytes.len() > MAX_LENGTH {
             return Err(LinkError::MessageError(format!(
                 "Message too long: {} vs {}",
-                msg.len(),
+                bytes.len(),
                 MAX_LENGTH
             )));
         }
 
         self.socket
-            .send_to(&self.add_envelope(msg), addr)
+            .send_to(&bytes, addr)
             .await
             .map_err(|e| LinkError::SocketError(e.to_string()))?;
 
@@ -84,12 +101,26 @@ impl FairLossLink {
                 }
             };
 
-            let (id, payload) = self.take_envelope(&buf[..len])?;
-            debug!("{:?} from {id}", payload);
+            let envelope: Envelope = match serde_json::from_slice(&buf[..len]) {
+                Err(e) => {
+                    debug!("invalid message received ({e}): {:?}", &buf[..len]);
+                    continue;
+                }
+                Ok(e) => e,
+            };
+
+            debug!("{:?} from {}", envelope.payload, envelope.sender);
+            if envelope.recipient != self.local_id {
+                debug!(
+                    "dropped message from {} because of wrong recipient {}",
+                    envelope.sender, envelope.recipient
+                );
+                continue;
+            }
 
             let indication = FllDeliver {
-                message: Arc::from(payload),
-                sender: id,
+                message: Arc::from(envelope.payload),
+                sender: envelope.sender,
             };
 
             indications_tx
@@ -103,25 +134,5 @@ impl FairLossLink {
         *indications_tx = None;
         debug!("finished");
         Ok(())
-    }
-
-    fn add_envelope(&self, msg: &[u8]) -> Vec<u8> {
-        let mut result = Vec::with_capacity(2 + msg.len());
-        result.extend_from_slice(&self.local_id.to_be_bytes());
-        result.extend_from_slice(msg);
-        result
-    }
-
-    fn take_envelope<'a>(&self, msg: &'a [u8]) -> Result<(NodeId, &'a [u8]), LinkError> {
-        if msg.len() < NodeId::ENCODED_LEN {
-            return Err(LinkError::MessageError("Message to short".to_owned()));
-        }
-
-        let (envelope, payload) = msg.split_at(NodeId::ENCODED_LEN);
-        let id_bytes: [u8; NodeId::ENCODED_LEN] = envelope.try_into().map_err(|e| {
-            LinkError::MessageError(format!("Could not obtain sender rank: {:?}", e))
-        })?;
-
-        Ok((NodeId::from_be_bytes(id_bytes), payload))
     }
 }
