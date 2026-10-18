@@ -61,7 +61,7 @@ impl fmt::Display for NodeId {
 }
 
 pub fn signals() -> (Signal, Signal) {
-    let sigtterm = signal(SignalKind::interrupt()).expect("creating sigint receiver");
+    let sigtterm = signal(SignalKind::terminate()).expect("creating sigterm receiver");
     let sigtint = signal(SignalKind::interrupt()).expect("creating sigint receiver");
     (sigtint, sigtterm)
 }
