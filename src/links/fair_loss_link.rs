@@ -44,6 +44,15 @@ impl FairLossLink {
 
     pub async fn send(&self, msg: &[u8], recipient: NodeId) -> Result<(), LinkError> {
         let addr = self.resolver.resolve(recipient);
+
+        if msg.len() > MAX_LENGTH {
+            return Err(LinkError::MessageError(format!(
+                "Message too long: {} vs {}",
+                msg.len(),
+                MAX_LENGTH
+            )));
+        }
+
         self.socket
             .send_to(&self.add_envelope(msg), addr)
             .await
