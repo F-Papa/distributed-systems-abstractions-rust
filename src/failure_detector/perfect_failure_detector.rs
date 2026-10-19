@@ -1,6 +1,7 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use log::debug;
+use serde::{Deserialize, Serialize};
 use tokio::{
     select,
     sync::{
@@ -10,10 +11,13 @@ use tokio::{
     },
 };
 
-use crate::links::{
-    LinkError::{self},
-    NodeId, Resolver,
-    perfect_link::{PerfectLink, PlDeliver},
+use crate::{
+    failure_detector::perfect_failure_detector::PfdMessage::{HeartReply, HeartbeatRequest},
+    links::{
+        LinkError::{self, MessageError},
+        NodeId, Resolver,
+        perfect_link::{PerfectLink, PlDeliver},
+    },
 };
 
 pub struct Crash {
@@ -32,8 +36,11 @@ pub struct PerfectFailureDetector {
     shutdown: Mutex<watch::Receiver<bool>>,
 }
 
-const HEARTBEAT_REQUEST: &str = "HEARTBEAT_REQUEST";
-const HEARTBEAT_REPLY: &str = "HEARTBEAT_REPLY";
+#[derive(Debug, Deserialize, Serialize)]
+enum PfdMessage {
+    HeartbeatRequest,
+    HeartReply,
+}
 
 impl PerfectFailureDetector {
     pub async fn new(
@@ -81,19 +88,20 @@ impl PerfectFailureDetector {
     async fn handle_link_indications(self: &Arc<Self>) -> Result<(), LinkError> {
         let mut indications = self.pl_indications.lock().await;
         while let Some(deliver) = indications.recv().await {
-            match std::str::from_utf8(&deliver.message) {
+            match serde_json::from_value(deliver.message) {
                 Err(_) => continue,
-                Ok(text) => {
-                    if text == HEARTBEAT_REPLY {
-                        debug!("{HEARTBEAT_REPLY} from {}", deliver.sender);
-                        self.alive.lock().await.insert(deliver.sender);
-                    } else if text == HEARTBEAT_REQUEST {
-                        debug!("{HEARTBEAT_REQUEST} from {}", deliver.sender);
-                        self.perfect_link
-                            .send(HEARTBEAT_REPLY.as_bytes(), deliver.sender)
-                            .await?;
-                        debug!("{HEARTBEAT_REPLY} sent to {}", deliver.sender);
-                    }
+                Ok(HeartReply) => {
+                    debug!("{:?} from {}", HeartReply, deliver.sender);
+                    self.alive.lock().await.insert(deliver.sender);
+                }
+                Ok(HeartbeatRequest) => {
+                    debug!("{:?} from {}", HeartbeatRequest, deliver.sender);
+
+                    let payload = serde_json::to_value(PfdMessage::HeartReply)
+                        .map_err(|e| MessageError(e.to_string()))?;
+
+                    self.perfect_link.send(&payload, deliver.sender).await?;
+                    debug!("{HEARTBEAT_REPLY} sent to {}", deliver.sender);
                 }
             };
         }
@@ -131,10 +139,16 @@ impl PerfectFailureDetector {
                     };
                 }
 
-                self.perfect_link
-                    .send(HEARTBEAT_REQUEST.as_bytes(), *p)
-                    .await?;
-                debug!("{HEARTBEAT_REQUEST} sent to {}", p);
+                let payload = match serde_json::to_value(HeartbeatRequest) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        debug!("Error encoding HeartbeatRequest: {:?}", e);
+                        continue;
+                    }
+                };
+
+                self.perfect_link.send(&payload, *p).await?;
+                debug!("{:?} sent to {}", HeartbeatRequest, p);
             }
 
             alive.clear();
