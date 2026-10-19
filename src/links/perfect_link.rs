@@ -1,12 +1,13 @@
 use log::debug;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
+use crate::links::LinkError::MessageError;
 use crate::links::stubborn_link::{SblDeliver, StubbornLink};
 use crate::links::{LinkError, NodeId, Resolver};
-
-const UUID_LEN: usize = 16;
 
 pub type PlDeliver = SblDeliver;
 
@@ -16,6 +17,12 @@ pub struct PerfectLink {
     indications_tx: Mutex<Option<mpsc::Sender<PlDeliver>>>,
     sbl_indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
     inbox: Arc<Mutex<HashSet<Uuid>>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PlEnvelope<T> {
+    id: Uuid,
+    payload: T,
 }
 
 impl PerfectLink {
@@ -42,9 +49,16 @@ impl PerfectLink {
         Ok(perfect_link)
     }
 
-    pub async fn send(&self, msg: &[u8], recipient: NodeId) -> Result<(), LinkError> {
-        self.stubborn_link.send(&add_envelope(msg), recipient).await
+    pub async fn send(&self, msg: &Value, recipient: NodeId) -> Result<(), LinkError> {
+        let envelope = PlEnvelope {
+            id: Uuid::new_v4(),
+            payload: msg,
+        };
+
+        let bytes = serde_json::to_value(&envelope).map_err(|e| MessageError(e.to_string()))?;
+        self.stubborn_link.send(Arc::from(bytes), recipient).await
     }
+
     pub async fn listen(&self) -> Result<(), LinkError> {
         let stubborn_link_cpy = Arc::clone(&self.stubborn_link);
         tokio::try_join!(stubborn_link_cpy.listen(), self.handle_indications())?;
@@ -57,31 +71,38 @@ impl PerfectLink {
         let mut sbl_indications = self.sbl_indications.lock().await;
         let mut indications_tx = self.indications_tx.lock().await;
         loop {
-            match sbl_indications.recv().await {
+            let indication = match sbl_indications.recv().await {
                 None => break,
-                Some(sbl_deliver) => {
-                    let (id, payload) = take_envelope(&sbl_deliver.message)?;
-                    if inbox.contains(&id) {
-                        continue;
-                    }
+                Some(sbl_deliver) => sbl_deliver,
+            };
 
-                    let indication = PlDeliver {
-                        message: Arc::from(payload),
-                        sender: sbl_deliver.sender,
-                    };
-
-                    if indications_tx
-                        .as_ref()
-                        .expect("get indications_tx")
-                        .send(indication)
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                    inbox.insert(id);
+            let envelope: PlEnvelope<Value> = match serde_json::from_value(indication.message) {
+                Err(e) => {
+                    debug!("invalid message ({e})");
+                    continue;
                 }
+                Ok(e) => e,
+            };
+
+            if inbox.contains(&envelope.id) {
+                continue;
             }
+
+            let indication = PlDeliver {
+                message: envelope.payload,
+                sender: indication.sender,
+            };
+
+            if indications_tx
+                .as_ref()
+                .expect("get indications_tx")
+                .send(indication)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            inbox.insert(envelope.id);
         }
         *indications_tx = None;
         Ok(())
@@ -90,22 +111,4 @@ impl PerfectLink {
     pub async fn close(&self) {
         self.stubborn_link.close().await
     }
-}
-
-fn take_envelope(msg: &[u8]) -> Result<(uuid::Uuid, &[u8]), LinkError> {
-    let (id_bytes, payload) = msg.split_at(UUID_LEN);
-    let id_bytes: [u8; 16] = id_bytes
-        .try_into()
-        .map_err(|e| LinkError::MessageError(format!("Could not obtain message id: {:?}", e)))?;
-
-    let id = uuid::Uuid::from_bytes(id_bytes);
-    Ok((id, payload))
-}
-
-fn add_envelope(msg: &[u8]) -> Vec<u8> {
-    let id = uuid::Uuid::new_v4().into_bytes();
-    let mut result = Vec::with_capacity(id.len() + msg.len());
-    result.extend_from_slice(&id);
-    result.extend_from_slice(msg);
-    result
 }

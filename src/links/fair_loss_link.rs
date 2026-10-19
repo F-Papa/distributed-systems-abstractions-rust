@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use log::debug;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::{
     net::UdpSocket,
     select,
@@ -10,8 +11,9 @@ use tokio::{
 
 use crate::links::{LinkError, MAX_LENGTH, NodeId, Resolver};
 
+#[derive(Debug)]
 pub struct FllDeliver {
-    pub message: Arc<[u8]>,
+    pub message: Value,
     pub sender: NodeId,
 }
 
@@ -25,10 +27,10 @@ pub struct FairLossLink {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Envelope {
+struct FllEnvelope<T> {
     sender: NodeId,
     recipient: NodeId,
-    payload: Vec<u8>,
+    payload: T,
 }
 
 impl FairLossLink {
@@ -51,13 +53,13 @@ impl FairLossLink {
         Ok(fll)
     }
 
-    pub async fn send(&self, msg: &[u8], recipient: NodeId) -> Result<(), LinkError> {
+    pub async fn send(&self, msg: &Value, recipient: NodeId) -> Result<(), LinkError> {
         let addr = self.resolver.resolve(recipient);
 
-        let envelope = Envelope {
+        let envelope = FllEnvelope {
             sender: self.local_id,
             recipient,
-            payload: msg.to_vec(),
+            payload: msg,
         };
 
         let bytes =
@@ -75,6 +77,7 @@ impl FairLossLink {
             .send_to(&bytes, addr)
             .await
             .map_err(|e| LinkError::SocketError(e.to_string()))?;
+        debug!("Sending {} bytes to {}", bytes.len(), recipient);
 
         Ok(())
     }
@@ -101,7 +104,7 @@ impl FairLossLink {
                 }
             };
 
-            let envelope: Envelope = match serde_json::from_slice(&buf[..len]) {
+            let envelope: FllEnvelope<Value> = match serde_json::from_slice(&buf[..len]) {
                 Err(e) => {
                     debug!("invalid message received ({e}): {:?}", &buf[..len]);
                     continue;
@@ -109,7 +112,7 @@ impl FairLossLink {
                 Ok(e) => e,
             };
 
-            debug!("{:?} from {}", envelope.payload, envelope.sender);
+            debug!("{} bytes from {}", len, envelope.sender);
             if envelope.recipient != self.local_id {
                 debug!(
                     "dropped message from {} because of wrong recipient {}",
@@ -119,7 +122,7 @@ impl FairLossLink {
             }
 
             let indication = FllDeliver {
-                message: Arc::from(envelope.payload),
+                message: envelope.payload,
                 sender: envelope.sender,
             };
 

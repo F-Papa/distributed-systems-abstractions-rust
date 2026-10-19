@@ -1,6 +1,7 @@
 use std::{collections::LinkedList, sync::Arc, time::Duration};
 
 use log::{debug, error};
+use serde_json::Value;
 use tokio::{
     select,
     sync::{Mutex, Notify, mpsc},
@@ -12,7 +13,7 @@ use crate::links::{
     fair_loss_link::{FairLossLink, FllDeliver},
 };
 
-type OutboxEntry = (NodeId, Arc<[u8]>);
+type OutboxEntry = (NodeId, Arc<Value>);
 
 pub type SblDeliver = FllDeliver;
 
@@ -91,13 +92,10 @@ impl StubbornLink {
         Ok(stubborn_link)
     }
 
-    pub async fn send(&self, msg: &[u8], recipient: NodeId) -> Result<(), LinkError> {
-        self.fair_loss_link.send(msg, recipient).await?;
-        self.outbox
-            .lock()
-            .await
-            .push_back((recipient, Arc::from(msg)));
+    pub async fn send(&self, msg: Arc<Value>, recipient: NodeId) -> Result<(), LinkError> {
+        self.fair_loss_link.send(msg.as_ref(), recipient).await?;
 
+        self.outbox.lock().await.push_back((recipient, msg));
         Ok(())
     }
 
@@ -115,6 +113,7 @@ impl StubbornLink {
             match fll_indications.recv().await {
                 None => break,
                 Some(indication) => {
+                    debug!("fll deliver");
                     if indications_tx
                         .as_ref()
                         .expect("get indications_tx")
