@@ -8,13 +8,13 @@ use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
 use crate::links::LinkError::MessageError;
-use crate::links::stubborn_link::{SblDeliver, StubbornLink};
+use crate::links::stubborn_link::{SblDeliver, RetransmitForever};
 use crate::links::{LinkError, NodeId, Resolver};
 
 pub type AplDeliver = SblDeliver;
 pub struct AuthPerfectLink {
     local_id: NodeId,
-    pub stubborn_link: Arc<StubbornLink>,
+    pub stubborn_link: Arc<RetransmitForever>,
     pub indications: Arc<Mutex<mpsc::Receiver<AplDeliver>>>,
     indications_tx: Mutex<Option<mpsc::Sender<AplDeliver>>>,
     sbl_indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
@@ -24,7 +24,7 @@ pub struct AuthPerfectLink {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct AplEnvelope<T, S> {
+struct Envelope<T, S> {
     id: Uuid,
     payload: T,
     signature: S,
@@ -38,7 +38,7 @@ impl AuthPerfectLink {
         signing_key: ed25519_dalek::SigningKey,
         verifiers: HashMap<NodeId, Arc<VerifyingKey>>,
     ) -> Result<Self, LinkError> {
-        let stubborn_link = StubbornLink::new(local_id, resolver, retransmission_override).await?;
+        let stubborn_link = RetransmitForever::new(local_id, resolver, retransmission_override).await?;
         let sbl_indications = Arc::clone(&stubborn_link.indications);
 
         let (tx, rx) = mpsc::channel::<AplDeliver>(32);
@@ -66,7 +66,7 @@ impl AuthPerfectLink {
         let to_sign = self.bytes_to_sign(&id, recipient, &payload);
         let signature = self.signing_key.sign(&to_sign).to_bytes();
 
-        let envelope = AplEnvelope {
+        let envelope = Envelope {
             id,
             signature: &signature[..],
             payload: msg,
@@ -108,7 +108,7 @@ impl AuthPerfectLink {
                 None => break,
             };
 
-            let envelope: AplEnvelope<Value, Vec<u8>> =
+            let envelope: Envelope<Value, Vec<u8>> =
                 match serde_json::from_value(sbl_deliver.message) {
                     Ok(e) => e,
                     Err(e) => {
@@ -144,7 +144,7 @@ impl AuthPerfectLink {
         Ok(())
     }
 
-    fn verify_signature(&self, sender: NodeId, envelope: &AplEnvelope<Value, Vec<u8>>) -> bool {
+    fn verify_signature(&self, sender: NodeId, envelope: &Envelope<Value, Vec<u8>>) -> bool {
         let verifier = match self.verifiers.get(&sender) {
             Some(verifier) => verifier,
             None => {

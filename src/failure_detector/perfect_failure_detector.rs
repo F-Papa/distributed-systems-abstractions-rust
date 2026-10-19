@@ -16,7 +16,7 @@ use crate::{
     links::{
         LinkError::{self, MessageError},
         NodeId, Resolver,
-        perfect_link::{PerfectLink, PlDeliver},
+        perfect_link::{EliminateDuplicates, PlDeliver},
     },
 };
 
@@ -24,11 +24,11 @@ pub struct Crash {
     pub node_id: NodeId,
 }
 
-pub struct PerfectFailureDetector {
+pub struct ExcludeOnTimeout {
     peers: HashSet<NodeId>,
     alive: Mutex<HashSet<NodeId>>,
     detected: Mutex<HashSet<NodeId>>,
-    perfect_link: Arc<PerfectLink>,
+    perfect_link: Arc<EliminateDuplicates>,
     pub indications: Mutex<mpsc::Receiver<Crash>>,
     indications_tx: Mutex<Option<mpsc::Sender<Crash>>>,
     pl_indications: Arc<Mutex<Receiver<PlDeliver>>>,
@@ -42,19 +42,19 @@ enum PfdMessage {
     HeartReply,
 }
 
-impl PerfectFailureDetector {
+impl ExcludeOnTimeout {
     pub async fn new(
         node_id: NodeId,
         resolver: Box<dyn Resolver>,
         peers: HashSet<NodeId>,
     ) -> Result<Self, LinkError> {
-        let perfect_link = Arc::new(PerfectLink::new(node_id, resolver, None).await?);
+        let perfect_link = Arc::new(EliminateDuplicates::new(node_id, resolver, None).await?);
         let pl_indications = Arc::clone(&perfect_link.indications);
 
         let (indications_tx, indications_rx) = channel::<Crash>(32);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let detector = PerfectFailureDetector {
+        let detector = ExcludeOnTimeout {
             peers: peers.clone(),
             alive: Mutex::new(peers.clone()),
             detected: Mutex::new(HashSet::new()),

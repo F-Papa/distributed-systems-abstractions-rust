@@ -17,7 +17,7 @@ type OutboxEntry = (NodeId, Arc<Value>);
 
 pub type SblDeliver = FllDeliver;
 
-pub struct StubbornLink {
+pub struct RetransmitForever {
     pub fair_loss_link: Arc<FairLossLink>,
     pub indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
     indications_tx: Mutex<Option<mpsc::Sender<SblDeliver>>>,
@@ -27,7 +27,7 @@ pub struct StubbornLink {
     retransmission_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl StubbornLink {
+impl RetransmitForever {
     pub async fn new(
         local_id: NodeId,
         resolver: Box<dyn Resolver>,
@@ -79,7 +79,7 @@ impl StubbornLink {
 
         let (tx, rx) = mpsc::channel::<SblDeliver>(32);
 
-        let stubborn_link = StubbornLink {
+        let stubborn_link = RetransmitForever {
             fair_loss_link,
             outbox,
             indications: Arc::from(Mutex::new(rx)),

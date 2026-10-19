@@ -27,7 +27,7 @@ pub struct FairLossLink {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct FllEnvelope<T> {
+struct Envelope<T> {
     sender: NodeId,
     recipient: NodeId,
     payload: T,
@@ -56,7 +56,7 @@ impl FairLossLink {
     pub async fn send(&self, msg: &Value, recipient: NodeId) -> Result<(), LinkError> {
         let addr = self.resolver.resolve(recipient);
 
-        let envelope = FllEnvelope {
+        let envelope = Envelope {
             sender: self.local_id,
             recipient,
             payload: msg,
@@ -104,7 +104,7 @@ impl FairLossLink {
                 }
             };
 
-            let envelope: FllEnvelope<Value> = match serde_json::from_slice(&buf[..len]) {
+            let envelope: Envelope<Value> = match serde_json::from_slice(&buf[..len]) {
                 Err(e) => {
                     debug!("invalid message received ({e}): {:?}", &buf[..len]);
                     continue;

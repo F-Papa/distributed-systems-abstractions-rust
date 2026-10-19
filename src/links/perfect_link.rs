@@ -6,13 +6,13 @@ use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
 use crate::links::LinkError::MessageError;
-use crate::links::stubborn_link::{SblDeliver, StubbornLink};
+use crate::links::stubborn_link::{SblDeliver, RetransmitForever};
 use crate::links::{LinkError, NodeId, Resolver};
 
 pub type PlDeliver = SblDeliver;
 
-pub struct PerfectLink {
-    pub stubborn_link: Arc<StubbornLink>,
+pub struct EliminateDuplicates {
+    pub stubborn_link: Arc<RetransmitForever>,
     pub indications: Arc<Mutex<mpsc::Receiver<PlDeliver>>>,
     indications_tx: Mutex<Option<mpsc::Sender<PlDeliver>>>,
     sbl_indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
@@ -20,25 +20,25 @@ pub struct PerfectLink {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct PlEnvelope<T> {
+struct Envelope<T> {
     id: Uuid,
     payload: T,
 }
 
-impl PerfectLink {
+impl EliminateDuplicates {
     pub async fn new(
         local_id: NodeId,
         resolver: Box<dyn Resolver>,
         retransmission_override: Option<Duration>,
     ) -> Result<Self, LinkError> {
-        let stubborn_link = StubbornLink::new(local_id, resolver, retransmission_override).await?;
+        let stubborn_link = RetransmitForever::new(local_id, resolver, retransmission_override).await?;
         let sbl_indications = Arc::clone(&stubborn_link.indications);
 
         let (tx, rx) = mpsc::channel::<PlDeliver>(32);
 
         let inbox: Arc<Mutex<HashSet<Uuid>>> = Arc::new(Mutex::new(HashSet::new()));
 
-        let perfect_link = PerfectLink {
+        let perfect_link = EliminateDuplicates {
             stubborn_link: Arc::new(stubborn_link),
             indications: Arc::from(Mutex::from(rx)),
             indications_tx: Mutex::from(Some(tx)),
@@ -50,7 +50,7 @@ impl PerfectLink {
     }
 
     pub async fn send(&self, msg: &Value, recipient: NodeId) -> Result<(), LinkError> {
-        let envelope = PlEnvelope {
+        let envelope = Envelope {
             id: Uuid::new_v4(),
             payload: msg,
         };
@@ -76,7 +76,7 @@ impl PerfectLink {
                 Some(sbl_deliver) => sbl_deliver,
             };
 
-            let envelope: PlEnvelope<Value> = match serde_json::from_value(indication.message) {
+            let envelope: Envelope<Value> = match serde_json::from_value(indication.message) {
                 Err(e) => {
                     debug!("invalid message ({e})");
                     continue;

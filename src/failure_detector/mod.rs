@@ -1,1 +1,2 @@
 pub mod perfect_failure_detector;
+pub mod eventually_perfect_failure_detector;

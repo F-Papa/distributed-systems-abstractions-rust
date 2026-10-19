@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 use tokio::try_join;
 
 use crate::{
-    failure_detector::perfect_failure_detector::PerfectFailureDetector,
+    failure_detector::perfect_failure_detector::ExcludeOnTimeout,
     links::{LocalhostResolver, NodeId},
 };
 
@@ -30,7 +30,7 @@ async fn main() {
         .collect();
 
     let detector = Arc::new(
-        PerfectFailureDetector::new(local_rank, Box::new(LocalhostResolver { base_port }), peers)
+        ExcludeOnTimeout::new(local_rank, Box::new(LocalhostResolver { base_port }), peers)
             .await
             .expect("detector"),
     );
