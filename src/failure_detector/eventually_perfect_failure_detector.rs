@@ -8,10 +8,10 @@ pub enum EpfdIndication {
     Restore(NodeId),
 }
 
-pub struct EventuallyPerfectFailureDetector {
-}
+pub struct EventuallyPerfectFailureDetector {}
 
 impl EventuallyPerfectFailureDetector {
     pub async fn new() -> Self {
+        Self {}
     }
 }
