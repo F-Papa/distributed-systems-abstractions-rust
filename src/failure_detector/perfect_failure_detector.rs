@@ -2,23 +2,31 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use log::debug;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::{
     select,
     sync::{
         Mutex,
-        mpsc::{self, Receiver, channel},
+        mpsc::{self, channel},
         watch,
     },
 };
 
 use crate::{
-    failure_detector::perfect_failure_detector::PfdMessage::{HeartReply, HeartbeatRequest},
-    links::{
-        LinkError::{self, MessageError},
-        NodeId, Resolver,
-        perfect_link::{EliminateDuplicates, PlDeliver},
-    },
+    common::BoxFuture,
+    links::{LinkError, perfect_link::PerfectLink},
 };
+
+use crate::{
+    failure_detector::perfect_failure_detector::PfdMessage::{HeartReply, HeartbeatRequest},
+    links::{LinkError::MessageError, NodeId},
+};
+
+pub trait PerfectFailureDetector: Sync + Send {
+    fn start(self: &Arc<Self>) -> BoxFuture<'_, Result<(), LinkError>>;
+    fn stop(self: &Arc<Self>) -> BoxFuture<'_, Result<(), LinkError>>;
+    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<Crash>>>;
+}
 
 pub struct Crash {
     pub node_id: NodeId,
@@ -28,10 +36,9 @@ pub struct ExcludeOnTimeout {
     peers: HashSet<NodeId>,
     alive: Mutex<HashSet<NodeId>>,
     detected: Mutex<HashSet<NodeId>>,
-    perfect_link: Arc<EliminateDuplicates>,
-    pub indications: Mutex<mpsc::Receiver<Crash>>,
+    perfect_link: Arc<dyn PerfectLink<Value>>,
+    indications: Arc<Mutex<mpsc::Receiver<Crash>>>,
     indications_tx: Mutex<Option<mpsc::Sender<Crash>>>,
-    pl_indications: Arc<Mutex<Receiver<PlDeliver>>>,
     shutdown_tx: watch::Sender<bool>,
     shutdown: Mutex<watch::Receiver<bool>>,
 }
@@ -42,51 +49,52 @@ enum PfdMessage {
     HeartReply,
 }
 
-impl ExcludeOnTimeout {
-    pub async fn new(
-        node_id: NodeId,
-        resolver: Box<dyn Resolver>,
-        peers: HashSet<NodeId>,
-    ) -> Result<Self, LinkError> {
-        let perfect_link = Arc::new(EliminateDuplicates::new(node_id, resolver, None).await?);
-        let pl_indications = Arc::clone(&perfect_link.indications);
+impl PerfectFailureDetector for ExcludeOnTimeout {
+    fn start(self: &Arc<Self>) -> BoxFuture<'_, Result<(), LinkError>> {
+        Box::pin(async move {
+            tokio::try_join!(
+                self.perfect_link.listen(),
+                self.handle_timeout(),
+                self.handle_link_indications()
+            )?;
+            Ok(())
+        })
+    }
 
+    fn stop(self: &Arc<Self>) -> BoxFuture<'_, Result<(), LinkError>> {
+        Box::pin(async move {
+            self.shutdown_tx.send_replace(true);
+            self.perfect_link.close().await;
+            Ok(())
+        })
+    }
+
+    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<Crash>>> {
+        Arc::clone(&self.indications)
+    }
+}
+
+impl ExcludeOnTimeout {
+    pub fn new(peers: HashSet<NodeId>, perfect_link: Arc<dyn PerfectLink<Value>>) -> Self {
         let (indications_tx, indications_rx) = channel::<Crash>(32);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let detector = ExcludeOnTimeout {
+        ExcludeOnTimeout {
             peers: peers.clone(),
             alive: Mutex::new(peers.clone()),
             detected: Mutex::new(HashSet::new()),
             perfect_link,
-            indications: Mutex::new(indications_rx),
+            indications: Arc::from(Mutex::from(indications_rx)),
             indications_tx: Mutex::new(Some(indications_tx)),
-            pl_indications,
             shutdown: Mutex::new(shutdown_rx),
             shutdown_tx,
-        };
-
-        return Ok(detector);
+        }
     }
 
-    pub async fn stop(self: &Arc<Self>) {
-        self.shutdown_tx.send_replace(true);
-        self.perfect_link.close().await;
-    }
+    async fn handle_link_indications(&self) -> Result<(), LinkError> {
+        let pl_indications = self.perfect_link.get_indications();
+        let mut indications = pl_indications.lock().await;
 
-    pub async fn start(self: &Arc<Self>) -> Result<(), LinkError> {
-        tokio::try_join!(
-            self.perfect_link.listen(),
-            self.handle_timeout(),
-            self.handle_link_indications()
-        )?;
-        debug!("finished");
-
-        Ok(())
-    }
-
-    async fn handle_link_indications(self: &Arc<Self>) -> Result<(), LinkError> {
-        let mut indications = self.pl_indications.lock().await;
         while let Some(deliver) = indications.recv().await {
             match serde_json::from_value(deliver.message) {
                 Err(_) => continue,
@@ -100,8 +108,8 @@ impl ExcludeOnTimeout {
                     let payload = serde_json::to_value(PfdMessage::HeartReply)
                         .map_err(|e| MessageError(e.to_string()))?;
 
-                    self.perfect_link.send(&payload, deliver.sender).await?;
-                    debug!("{HEARTBEAT_REPLY} sent to {}", deliver.sender);
+                    self.perfect_link.send(payload, deliver.sender).await?;
+                    debug!("{:?} sent to {}", HeartReply, deliver.sender);
                 }
             };
         }
@@ -109,7 +117,7 @@ impl ExcludeOnTimeout {
         Ok(())
     }
 
-    async fn handle_timeout(self: &Arc<Self>) -> Result<(), LinkError> {
+    async fn handle_timeout(&self) -> Result<(), LinkError> {
         let mut tx = self.indications_tx.lock().await;
         let mut shutdown = self.shutdown.lock().await;
 
@@ -147,7 +155,7 @@ impl ExcludeOnTimeout {
                     }
                 };
 
-                self.perfect_link.send(&payload, *p).await?;
+                self.perfect_link.send(payload, *p).await?;
                 debug!("{:?} sent to {}", HeartbeatRequest, p);
             }
 

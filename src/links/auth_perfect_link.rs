@@ -3,21 +3,67 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc};
 use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
+use crate::common::BoxFuture;
 use crate::links::LinkError::MessageError;
-use crate::links::stubborn_link::{SblDeliver, RetransmitForever};
-use crate::links::{LinkError, NodeId, Resolver};
+use crate::links::stubborn_link::{SblDeliver, StubbornLink};
+use crate::links::{LinkError, NodeId};
 
 pub type AplDeliver = SblDeliver;
-pub struct AuthPerfectLink {
+
+pub trait AuthenticatedPerfectLink<T>: Send + Sync {
+    fn send(&self, payload: T, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>>;
+    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>>;
+    fn close(&self) -> BoxFuture<'_, ()>;
+    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<AplDeliver>>>;
+}
+
+impl AuthenticatedPerfectLink<Value> for AuthenticateAndFilter {
+    fn send(&self, payload: Value, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>> {
+        Box::pin(async move {
+            let id = uuid::Uuid::new_v4();
+            let payload_bytes =
+                serde_json::to_vec(&payload).map_err(|e| MessageError(e.to_string()))?;
+
+            let to_sign = self.bytes_to_sign(&id, recipient, &payload_bytes);
+            let signature = self.signing_key.sign(&to_sign).to_bytes();
+
+            let envelope = Envelope {
+                id,
+                signature: &signature[..],
+                payload,
+            };
+
+            let value = serde_json::to_value(envelope).map_err(|e| MessageError(e.to_string()))?;
+            self.stubborn_link.send(value, recipient).await?;
+            Ok(())
+        })
+    }
+
+    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>> {
+        Box::pin(async move {
+            tokio::try_join!(self.stubborn_link.listen(), self.handle_indications())?;
+            Ok(())
+        })
+    }
+
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move { self.stubborn_link.close().await })
+    }
+
+    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<AplDeliver>>> {
+        Arc::clone(&self.indications)
+    }
+}
+
+pub struct AuthenticateAndFilter {
     local_id: NodeId,
-    pub stubborn_link: Arc<RetransmitForever>,
-    pub indications: Arc<Mutex<mpsc::Receiver<AplDeliver>>>,
+    stubborn_link: Arc<dyn StubbornLink<Value>>,
+    indications: Arc<Mutex<mpsc::Receiver<AplDeliver>>>,
     indications_tx: Mutex<Option<mpsc::Sender<AplDeliver>>>,
-    sbl_indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
     inbox: Arc<Mutex<HashSet<Uuid>>>,
     signing_key: ed25519_dalek::SigningKey,
     verifiers: HashMap<NodeId, Arc<VerifyingKey>>,
@@ -30,52 +76,27 @@ struct Envelope<T, S> {
     signature: S,
 }
 
-impl AuthPerfectLink {
+impl AuthenticateAndFilter {
     pub async fn new(
         local_id: NodeId,
-        resolver: Box<dyn Resolver>,
-        retransmission_override: Option<Duration>,
         signing_key: ed25519_dalek::SigningKey,
         verifiers: HashMap<NodeId, Arc<VerifyingKey>>,
+        stubborn_link: Arc<dyn StubbornLink<Value>>,
     ) -> Result<Self, LinkError> {
-        let stubborn_link = RetransmitForever::new(local_id, resolver, retransmission_override).await?;
-        let sbl_indications = Arc::clone(&stubborn_link.indications);
-
         let (tx, rx) = mpsc::channel::<AplDeliver>(32);
-
         let inbox: Arc<Mutex<HashSet<Uuid>>> = Arc::new(Mutex::new(HashSet::new()));
 
-        let perfect_link = AuthPerfectLink {
+        let perfect_link = AuthenticateAndFilter {
             local_id,
-            stubborn_link: Arc::new(stubborn_link),
+            stubborn_link,
             indications: Arc::from(Mutex::from(rx)),
             indications_tx: Mutex::from(Some(tx)),
-            sbl_indications,
             inbox,
             signing_key,
             verifiers,
         };
 
         Ok(perfect_link)
-    }
-
-    pub async fn send(&self, msg: Value, recipient: NodeId) -> Result<(), LinkError> {
-        let id = uuid::Uuid::new_v4();
-        let payload = serde_json::to_vec(&msg).map_err(|e| MessageError(e.to_string()))?;
-
-        let to_sign = self.bytes_to_sign(&id, recipient, &payload);
-        let signature = self.signing_key.sign(&to_sign).to_bytes();
-
-        let envelope = Envelope {
-            id,
-            signature: &signature[..],
-            payload: msg,
-        };
-
-        let value = serde_json::to_value(envelope).map_err(|e| MessageError(e.to_string()))?;
-
-        self.stubborn_link.send(Arc::from(value), recipient).await?;
-        Ok(())
     }
 
     fn bytes_to_sign(&self, id: &Uuid, recipient: NodeId, payload: &[u8]) -> Vec<u8> {
@@ -88,19 +109,16 @@ impl AuthPerfectLink {
         buf
     }
 
-    pub async fn listen(&self) -> Result<(), LinkError> {
-        tokio::try_join!(self.stubborn_link.listen(), self.handle_indications())?;
-        Ok(())
-    }
-
     async fn handle_indications(&self) -> Result<(), LinkError> {
         let indications_tx = match self.indications_tx.lock().await.take() {
             None => return Err(LinkError::LinkClosed()),
             Some(tx) => tx,
         };
 
+        let sbl_indications = self.stubborn_link.get_indications();
+
+        let mut sbl_indications = sbl_indications.lock().await;
         let mut inbox = self.inbox.lock().await;
-        let mut sbl_indications = self.sbl_indications.lock().await;
 
         loop {
             let sbl_deliver = match sbl_indications.recv().await {
@@ -123,7 +141,7 @@ impl AuthPerfectLink {
             }
 
             if inbox.contains(&envelope.id) {
-                debug!("Duplicate from {}: {}", sbl_deliver.sender, &envelope.id);
+                debug!("Duplicate from {}: {}", sbl_deliver.sender, envelope.id);
                 continue;
             }
 
@@ -171,9 +189,5 @@ impl AuthPerfectLink {
         };
 
         verifier.verify(&bytes_to_verify, &signature).is_ok()
-    }
-
-    pub async fn close(&self) {
-        self.stubborn_link.close().await
     }
 }

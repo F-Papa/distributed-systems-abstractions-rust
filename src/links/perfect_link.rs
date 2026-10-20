@@ -1,21 +1,28 @@
 use log::debug;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc};
 use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
+use crate::common::BoxFuture;
 use crate::links::LinkError::MessageError;
-use crate::links::stubborn_link::{SblDeliver, RetransmitForever};
-use crate::links::{LinkError, NodeId, Resolver};
+use crate::links::stubborn_link::{SblDeliver, StubbornLink};
+use crate::links::{LinkError, NodeId};
 
 pub type PlDeliver = SblDeliver;
 
+pub trait PerfectLink<T>: Send + Sync {
+    fn send(&self, payload: T, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>>;
+    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>>;
+    fn close(&self) -> BoxFuture<'_, ()>;
+    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<PlDeliver>>>;
+}
+
 pub struct EliminateDuplicates {
-    pub stubborn_link: Arc<RetransmitForever>,
-    pub indications: Arc<Mutex<mpsc::Receiver<PlDeliver>>>,
+    stubborn_link: Arc<dyn StubbornLink<Value>>,
+    indications: Arc<Mutex<mpsc::Receiver<PlDeliver>>>,
     indications_tx: Mutex<Option<mpsc::Sender<PlDeliver>>>,
-    sbl_indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
     inbox: Arc<Mutex<HashSet<Uuid>>>,
 }
 
@@ -25,58 +32,63 @@ struct Envelope<T> {
     payload: T,
 }
 
+impl PerfectLink<Value> for EliminateDuplicates {
+    fn send(&self, payload: Value, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>> {
+        Box::pin(async move {
+            let envelope = Envelope {
+                id: Uuid::new_v4(),
+                payload,
+            };
+
+            let bytes = serde_json::to_value(&envelope).map_err(|e| MessageError(e.to_string()))?;
+            self.stubborn_link.send(bytes, recipient).await
+        })
+    }
+
+    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>> {
+        Box::pin(async move {
+            let stubborn_link_cpy = Arc::clone(&self.stubborn_link);
+            tokio::try_join!(stubborn_link_cpy.listen(), self.handle_indications())?;
+            debug!("finished");
+            Ok(())
+        })
+    }
+
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move { self.stubborn_link.close().await })
+    }
+
+    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<PlDeliver>>> {
+        Arc::clone(&self.indications)
+    }
+}
+
 impl EliminateDuplicates {
-    pub async fn new(
-        local_id: NodeId,
-        resolver: Box<dyn Resolver>,
-        retransmission_override: Option<Duration>,
-    ) -> Result<Self, LinkError> {
-        let stubborn_link = RetransmitForever::new(local_id, resolver, retransmission_override).await?;
-        let sbl_indications = Arc::clone(&stubborn_link.indications);
+    pub fn new(stubborn_link: Arc<dyn StubbornLink<Value>>) -> Self {
+        let (indications_tx, indications) = mpsc::channel(32);
+        let inbox = Arc::from(Mutex::from(HashSet::new()));
 
-        let (tx, rx) = mpsc::channel::<PlDeliver>(32);
-
-        let inbox: Arc<Mutex<HashSet<Uuid>>> = Arc::new(Mutex::new(HashSet::new()));
-
-        let perfect_link = EliminateDuplicates {
-            stubborn_link: Arc::new(stubborn_link),
-            indications: Arc::from(Mutex::from(rx)),
-            indications_tx: Mutex::from(Some(tx)),
-            sbl_indications,
+        Self {
+            stubborn_link,
+            indications: Arc::from(Mutex::from(indications)),
+            indications_tx: Mutex::from(Some(indications_tx)),
             inbox,
-        };
-
-        Ok(perfect_link)
-    }
-
-    pub async fn send(&self, msg: &Value, recipient: NodeId) -> Result<(), LinkError> {
-        let envelope = Envelope {
-            id: Uuid::new_v4(),
-            payload: msg,
-        };
-
-        let bytes = serde_json::to_value(&envelope).map_err(|e| MessageError(e.to_string()))?;
-        self.stubborn_link.send(Arc::from(bytes), recipient).await
-    }
-
-    pub async fn listen(&self) -> Result<(), LinkError> {
-        let stubborn_link_cpy = Arc::clone(&self.stubborn_link);
-        tokio::try_join!(stubborn_link_cpy.listen(), self.handle_indications())?;
-        debug!("finished");
-        Ok(())
+        }
     }
 
     async fn handle_indications(&self) -> Result<(), LinkError> {
-        let mut inbox = self.inbox.lock().await;
-        let mut sbl_indications = self.sbl_indications.lock().await;
+        let stubborn_link_indications = Arc::clone(&self.stubborn_link.get_indications());
+
+        let mut sbl_indications = stubborn_link_indications.lock().await;
         let mut indications_tx = self.indications_tx.lock().await;
+        let mut inbox = self.inbox.lock().await;
         loop {
-            let indication = match sbl_indications.recv().await {
+            let sbl_deliver = match sbl_indications.recv().await {
                 None => break,
                 Some(sbl_deliver) => sbl_deliver,
             };
 
-            let envelope: Envelope<Value> = match serde_json::from_value(indication.message) {
+            let envelope: Envelope<Value> = match serde_json::from_value(sbl_deliver.message) {
                 Err(e) => {
                     debug!("invalid message ({e})");
                     continue;
@@ -90,7 +102,7 @@ impl EliminateDuplicates {
 
             let indication = PlDeliver {
                 message: envelope.payload,
-                sender: indication.sender,
+                sender: sbl_deliver.sender,
             };
 
             if indications_tx
@@ -106,9 +118,5 @@ impl EliminateDuplicates {
         }
         *indications_tx = None;
         Ok(())
-    }
-
-    pub async fn close(&self) {
-        self.stubborn_link.close().await
     }
 }

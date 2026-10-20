@@ -1,140 +1,132 @@
 use std::{collections::LinkedList, sync::Arc, time::Duration};
 
-use log::{debug, error};
 use serde_json::Value;
 use tokio::{
     select,
-    sync::{Mutex, Notify, mpsc},
-    task::JoinHandle,
+    sync::{Mutex, mpsc, watch},
 };
 
-use crate::links::{
-    LinkError, NodeId, Resolver,
-    fair_loss_link::{FairLossLink, FllDeliver},
+use crate::{
+    common::BoxFuture,
+    links::{
+        LinkError::{self, InternalError},
+        NodeId,
+        fair_loss_link::{FairLossLink, FllDeliver},
+    },
 };
 
 type OutboxEntry = (NodeId, Arc<Value>);
 
 pub type SblDeliver = FllDeliver;
 
+pub trait StubbornLink<T>: Send + Sync {
+    fn send(&self, payload: T, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>>;
+    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>>;
+    fn close(&self) -> BoxFuture<'_, ()>;
+    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<SblDeliver>>>;
+}
+
 pub struct RetransmitForever {
-    pub fair_loss_link: Arc<FairLossLink>,
-    pub indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
+    indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
+    fair_loss_link: Arc<FairLossLink>,
     indications_tx: Mutex<Option<mpsc::Sender<SblDeliver>>>,
-    fll_indications: Arc<Mutex<mpsc::Receiver<FllDeliver>>>,
     outbox: Arc<Mutex<LinkedList<OutboxEntry>>>,
-    shutdown: Arc<Notify>,
-    retransmission_handle: Mutex<Option<JoinHandle<()>>>,
+    shutdown: Arc<Mutex<watch::Receiver<bool>>>,
+    shutdown_tx: Arc<watch::Sender<bool>>,
+    retransmission_period: Duration,
+}
+
+impl StubbornLink<Value> for RetransmitForever {
+    fn send(&self, payload: Value, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>> {
+        Box::pin(async move {
+            self.fair_loss_link.send(&payload, recipient).await?;
+            self.outbox
+                .lock()
+                .await
+                .push_back((recipient, Arc::from(payload)));
+            Ok(())
+        })
+    }
+
+    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>> {
+        Box::pin(async move {
+            tokio::try_join!(
+                self.retransmit(),
+                self.fair_loss_link.listen(),
+                self.handle_indications()
+            )?;
+            Ok(())
+        })
+    }
+
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.shutdown_tx.send_replace(true);
+            self.fair_loss_link.close().await;
+        })
+    }
+
+    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<SblDeliver>>> {
+        Arc::clone(&self.indications)
+    }
 }
 
 impl RetransmitForever {
-    pub async fn new(
-        local_id: NodeId,
-        resolver: Box<dyn Resolver>,
-        retransmission_override: Option<Duration>,
-    ) -> Result<Self, LinkError> {
+    pub fn new(retransmission_override: Option<Duration>, fair_loss_link: FairLossLink) -> Self {
         const DEFAULT_RETRANSMISSION_SECS: u64 = 5;
 
-        let fair_loss_link = Arc::new(FairLossLink::new(local_id, resolver).await?);
-        let fll_indications = Arc::clone(&fair_loss_link.indications);
-        let outbox = Arc::new(Mutex::new(LinkedList::new()));
-        let shutdown = Arc::new(Notify::new());
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        let (indications_tx, indications) = mpsc::channel::<SblDeliver>(32);
 
-        let fll_copy = Arc::clone(&fair_loss_link);
-        let outbox_copy = Arc::clone(&outbox);
-        let shutdown_cpy = Arc::clone(&shutdown);
+        RetransmitForever {
+            fair_loss_link: Arc::from(fair_loss_link),
+            outbox: Arc::new(Mutex::new(LinkedList::new())),
+            indications: Arc::from(Mutex::new(indications)),
+            indications_tx: Mutex::from(Some(indications_tx)),
+            shutdown: Arc::from(Mutex::from(shutdown)),
+            shutdown_tx: Arc::from(shutdown_tx),
+            retransmission_period: retransmission_override
+                .unwrap_or(Duration::from_secs(DEFAULT_RETRANSMISSION_SECS)),
+        }
+    }
 
-        let retransmission_handle = tokio::spawn(async move {
-            loop {
-                select! {
-                    _ = tokio::time::sleep(
-                        retransmission_override.unwrap_or(
-                            Duration::from_secs(DEFAULT_RETRANSMISSION_SECS)
-                        )
-                    ) => {}
-
-                    _ = shutdown_cpy.notified() => {
-                        break
-                    },
-
-                }
-
-                let messages: Vec<OutboxEntry>;
-                {
-                    messages = outbox_copy
-                        .lock()
-                        .await
-                        .iter()
-                        .map(|(a, b)| (*a, Arc::clone(b)))
-                        .collect();
-                }
-
-                for (peer_rank, msg) in messages.iter() {
-                    if let Err(e) = fll_copy.send(msg, *peer_rank).await {
-                        error!("Error sending message: {:?}", e);
-                    }
-                }
+    async fn retransmit(&self) -> Result<(), LinkError> {
+        let mut shutdown_watch = self.shutdown.lock().await;
+        loop {
+            select! {
+                _ = shutdown_watch.wait_for(|v| *v) => { break },
+                _ = tokio::time::sleep(self.retransmission_period) => {}
             }
-        });
 
-        let (tx, rx) = mpsc::channel::<SblDeliver>(32);
+            let messages: Vec<OutboxEntry>;
+            {
+                messages = self
+                    .outbox
+                    .lock()
+                    .await
+                    .iter()
+                    .map(|(a, b)| (*a, Arc::clone(b)))
+                    .collect();
+            }
 
-        let stubborn_link = RetransmitForever {
-            fair_loss_link,
-            outbox,
-            indications: Arc::from(Mutex::new(rx)),
-            indications_tx: Mutex::from(Some(tx)),
-            fll_indications,
-            shutdown,
-            retransmission_handle: Mutex::new(Some(retransmission_handle)),
-        };
-
-        Ok(stubborn_link)
-    }
-
-    pub async fn send(&self, msg: Arc<Value>, recipient: NodeId) -> Result<(), LinkError> {
-        self.fair_loss_link.send(msg.as_ref(), recipient).await?;
-
-        self.outbox.lock().await.push_back((recipient, msg));
-        Ok(())
-    }
-
-    pub async fn listen(&self) -> Result<(), LinkError> {
-        let fair_loss_link_cpy = Arc::clone(&self.fair_loss_link);
-        tokio::try_join!(fair_loss_link_cpy.listen(), self.handle_indications())?;
-        debug!("finished");
+            for (peer_rank, msg) in messages.iter() {
+                self.fair_loss_link.send(msg, *peer_rank).await?;
+            }
+        }
         Ok(())
     }
 
     async fn handle_indications(&self) -> Result<(), LinkError> {
-        let mut indications_tx = self.indications_tx.lock().await;
-        let mut fll_indications = self.fll_indications.lock().await;
-        loop {
-            match fll_indications.recv().await {
-                None => break,
-                Some(indication) => {
-                    debug!("fll deliver");
-                    if indications_tx
-                        .as_ref()
-                        .expect("get indications_tx")
-                        .send(indication)
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-        }
-        *indications_tx = None;
-        Ok(())
-    }
+        let indications_tx = self.indications_tx.lock().await.take();
+        let mut fll_indications = self.fair_loss_link.indications.lock().await;
 
-    pub async fn close(&self) {
-        self.fair_loss_link.close().await;
-        self.shutdown.notify_one();
-        if let Some(handle) = self.retransmission_handle.lock().await.take() {
-            handle.await.unwrap()
-        };
+        while let (Some(fll_indication), Some(tx)) =
+            (fll_indications.recv().await, indications_tx.as_ref())
+        {
+            tx.send(fll_indication)
+                .await
+                .map_err(|e| InternalError(e.to_string()))?;
+        }
+        Ok(())
     }
 }

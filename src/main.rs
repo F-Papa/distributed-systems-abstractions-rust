@@ -2,10 +2,14 @@ use std::{collections::HashSet, sync::Arc};
 use tokio::try_join;
 
 use crate::{
-    failure_detector::perfect_failure_detector::ExcludeOnTimeout,
-    links::{LocalhostResolver, NodeId},
+    failure_detector::perfect_failure_detector::{ExcludeOnTimeout, PerfectFailureDetector},
+    links::{
+        LocalhostResolver, NodeId, fair_loss_link::FairLossLink, perfect_link::EliminateDuplicates,
+        stubborn_link::RetransmitForever,
+    },
 };
 
+pub mod common;
 pub mod crypto;
 pub mod failure_detector;
 pub mod links;
@@ -25,19 +29,22 @@ async fn main() {
     let n_peers = args[3].parse::<u16>().expect("Invalid number of peers");
 
     let peers: HashSet<NodeId> = (1..=n_peers)
-        .map(|id| NodeId::from(id))
+        .map(NodeId::from)
         .filter(|id| *id != local_rank)
         .collect();
 
-    let detector = Arc::new(
-        ExcludeOnTimeout::new(local_rank, Box::new(LocalhostResolver { base_port }), peers)
-            .await
-            .expect("detector"),
-    );
+    let fll = FairLossLink::new(local_rank, Box::from(LocalhostResolver { base_port }))
+        .await
+        .expect("fair_loss_link");
+
+    let sbl = RetransmitForever::new(None, fll);
+    let pl = EliminateDuplicates::new(Arc::from(sbl));
+    let detector = Arc::from(ExcludeOnTimeout::new(peers, Arc::from(pl)));
 
     let detector_cpy = Arc::clone(&detector);
     let handle_indications = async move {
-        let mut indications = detector_cpy.indications.lock().await;
+        let indications = detector_cpy.get_indications();
+        let mut indications = indications.lock().await;
         loop {
             match indications.recv().await {
                 None => break,
