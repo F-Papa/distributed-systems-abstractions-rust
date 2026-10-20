@@ -18,7 +18,7 @@ impl ShutdownHandler {
         }
     }
     pub async fn shutdown(&self) {
-        self.sender.send_replace(false);
+        self.sender.send_replace(true);
     }
 
     pub async fn wait(&self) {
