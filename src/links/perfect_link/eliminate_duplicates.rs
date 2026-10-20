@@ -7,17 +7,9 @@ use uuid::{self, Uuid};
 
 use crate::common::BoxFuture;
 use crate::links::LinkError::MessageError;
-use crate::links::stubborn_link::{SblDeliver, StubbornLink};
+use crate::links::perfect_link::{PerfectLink, PlDeliver};
+use crate::links::stubborn_link::StubbornLink;
 use crate::links::{LinkError, NodeId};
-
-pub type PlDeliver = SblDeliver;
-
-pub trait PerfectLink<T>: Send + Sync {
-    fn send(&self, payload: T, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn close(&self) -> BoxFuture<'_, ()>;
-    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<PlDeliver>>>;
-}
 
 pub struct EliminateDuplicates {
     stubborn_link: Arc<dyn StubbornLink<Value>>,
