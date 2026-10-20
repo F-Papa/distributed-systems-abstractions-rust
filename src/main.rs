@@ -1,12 +1,9 @@
-use std::{collections::HashSet, sync::Arc};
-use tokio::try_join;
+use std::sync::Arc;
 
-use crate::{
-    failure_detector::perfect_failure_detector::{ExcludeOnTimeout, PerfectFailureDetector},
-    links::{
-        LocalhostResolver, NodeId, fair_loss_link::FairLossLink, perfect_link::EliminateDuplicates,
-        stubborn_link::RetransmitForever,
-    },
+use crate::links::{
+    LocalhostResolver, NodeId,
+    fair_loss_link::FairLossLink,
+    perfect_link::{AcknowledgeMessages, PerfectLink},
 };
 
 pub mod common;
@@ -26,36 +23,47 @@ async fn main() {
 
     let base_port = args[1].parse::<u16>().expect("Invalid base port");
     let local_rank = NodeId::new(args[2].parse::<u16>().expect("Invalid local rank"));
-    let n_peers = args[3].parse::<u16>().expect("Invalid number of peers");
+    // let n_peers = args[3].parse::<u16>().expect("Invalid number of peers");
 
-    let peers: HashSet<NodeId> = (1..=n_peers)
-        .map(NodeId::from)
-        .filter(|id| *id != local_rank)
-        .collect();
+    // let peers: HashSet<NodeId> = (1..=n_peers)
+    //     .map(NodeId::from)
+    //     .filter(|id| *id != local_rank)
+    //     .collect();
 
     let fll = FairLossLink::new(local_rank, Box::from(LocalhostResolver { base_port }))
         .await
         .expect("fair_loss_link");
 
-    let sbl = RetransmitForever::new(None, fll);
-    let pl = EliminateDuplicates::new(Arc::from(sbl));
-    let detector = Arc::from(ExcludeOnTimeout::new(peers, Arc::from(pl)));
+    let pl = Arc::from(AcknowledgeMessages::new(fll, None));
 
-    let detector_cpy = Arc::clone(&detector);
+    let pl_copy = Arc::clone(&pl);
     let handle_indications = async move {
-        let indications = detector_cpy.get_indications();
+        let indications = pl_copy.get_indications();
         let mut indications = indications.lock().await;
         loop {
             match indications.recv().await {
                 None => break,
                 Some(indication) => {
-                    println!("Process {} crashed!", indication.node_id)
+                    println!(
+                        "Message from {}: {}",
+                        indication.sender,
+                        indication.message.to_string()
+                    )
                 }
             };
         }
-
-        Ok(())
     };
 
-    try_join!(detector.start(), handle_indications).unwrap();
+    let pl_copy = Arc::clone(&pl);
+    tokio::spawn(async move { pl_copy.listen().await });
+
+    let msg = serde_json::to_value("Hello gege").unwrap();
+
+    let pl_copy = Arc::clone(&pl);
+    pl_copy
+        .send(msg, NodeId::new(local_rank.get() + 1))
+        .await
+        .unwrap();
+
+    tokio::spawn(handle_indications).await.unwrap();
 }
