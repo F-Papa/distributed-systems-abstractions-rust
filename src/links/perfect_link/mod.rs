@@ -10,6 +10,9 @@ use crate::{
 mod eliminate_duplicates;
 pub use eliminate_duplicates::EliminateDuplicates;
 
+mod acknowledge_messages;
+pub use acknowledge_messages::AcknowledgeMessages;
+
 pub type PlDeliver = SblDeliver;
 
 pub trait PerfectLink<T>: Send + Sync {
