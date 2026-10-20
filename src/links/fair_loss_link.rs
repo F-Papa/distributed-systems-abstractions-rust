@@ -6,10 +6,13 @@ use serde_json::Value;
 use tokio::{
     net::UdpSocket,
     select,
-    sync::{Mutex, Notify, mpsc},
+    sync::{Mutex, mpsc},
 };
 
-use crate::links::{LinkError, MAX_LENGTH, NodeId, Resolver};
+use crate::{
+    common::ShutdownHandler,
+    links::{LinkError, MAX_LENGTH, NodeId, Resolver},
+};
 
 #[derive(Debug)]
 pub struct FllDeliver {
@@ -20,10 +23,10 @@ pub struct FllDeliver {
 pub struct FairLossLink {
     pub socket: UdpSocket,
     pub resolver: Box<dyn Resolver>,
-    pub indications: Arc<Mutex<mpsc::Receiver<FllDeliver>>>,
+    indications: Arc<Mutex<mpsc::Receiver<FllDeliver>>>,
     indications_tx: Mutex<Option<mpsc::Sender<FllDeliver>>>,
     local_id: NodeId,
-    shutdown: Arc<Notify>,
+    shutdown_handler: ShutdownHandler,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,10 +50,14 @@ impl FairLossLink {
             indications: Arc::from(Mutex::new(rx)),
             indications_tx: Mutex::new(Some(tx)),
             local_id,
-            shutdown: Arc::new(Notify::new()),
+            shutdown_handler: ShutdownHandler::new(),
         };
 
         Ok(fll)
+    }
+
+    pub fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<FllDeliver>>> {
+        Arc::clone(&self.indications)
     }
 
     pub async fn send(&self, msg: &Value, recipient: NodeId) -> Result<(), LinkError> {
@@ -83,7 +90,7 @@ impl FairLossLink {
     }
 
     pub async fn close(&self) {
-        self.shutdown.notify_one();
+        self.shutdown_handler.shutdown().await
     }
 
     pub async fn listen(&self) -> Result<(), LinkError> {
@@ -95,9 +102,7 @@ impl FairLossLink {
         loop {
             let mut buf = [0_u8; MAX_LENGTH];
             let len = select! {
-                _ = self.shutdown.notified() => {
-                    break
-                }
+                _ = self.shutdown_handler.wait() => { break }
 
                 result = self.socket.recv(&mut buf) => {
                     result.map_err(|e| LinkError::SocketError(e.to_string()))?

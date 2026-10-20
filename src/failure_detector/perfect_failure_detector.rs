@@ -8,12 +8,11 @@ use tokio::{
     sync::{
         Mutex,
         mpsc::{self, channel},
-        watch,
     },
 };
 
 use crate::{
-    common::BoxFuture,
+    common::{BoxFuture, ShutdownHandler},
     links::{LinkError, perfect_link::PerfectLink},
 };
 
@@ -39,8 +38,7 @@ pub struct ExcludeOnTimeout {
     perfect_link: Arc<dyn PerfectLink<Value>>,
     indications: Arc<Mutex<mpsc::Receiver<Crash>>>,
     indications_tx: Mutex<Option<mpsc::Sender<Crash>>>,
-    shutdown_tx: watch::Sender<bool>,
-    shutdown: Mutex<watch::Receiver<bool>>,
+    shutdown_handler: ShutdownHandler,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -63,7 +61,7 @@ impl PerfectFailureDetector for ExcludeOnTimeout {
 
     fn stop(self: &Arc<Self>) -> BoxFuture<'_, Result<(), LinkError>> {
         Box::pin(async move {
-            self.shutdown_tx.send_replace(true);
+            self.shutdown_handler.shutdown().await;
             self.perfect_link.close().await;
             Ok(())
         })
@@ -77,7 +75,6 @@ impl PerfectFailureDetector for ExcludeOnTimeout {
 impl ExcludeOnTimeout {
     pub fn new(peers: HashSet<NodeId>, perfect_link: Arc<dyn PerfectLink<Value>>) -> Self {
         let (indications_tx, indications_rx) = channel::<Crash>(32);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         ExcludeOnTimeout {
             peers: peers.clone(),
@@ -86,8 +83,7 @@ impl ExcludeOnTimeout {
             perfect_link,
             indications: Arc::from(Mutex::from(indications_rx)),
             indications_tx: Mutex::new(Some(indications_tx)),
-            shutdown: Mutex::new(shutdown_rx),
-            shutdown_tx,
+            shutdown_handler: ShutdownHandler::new(),
         }
     }
 
@@ -119,11 +115,10 @@ impl ExcludeOnTimeout {
 
     async fn handle_timeout(&self) -> Result<(), LinkError> {
         let mut tx = self.indications_tx.lock().await;
-        let mut shutdown = self.shutdown.lock().await;
 
         'outer: loop {
             select! {
-            _ = shutdown.wait_for(|value| *value) => {
+            _ = self.shutdown_handler.wait() => {
                 break 'outer;
             }
 

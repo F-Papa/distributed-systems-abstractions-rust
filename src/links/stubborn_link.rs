@@ -3,11 +3,11 @@ use std::{collections::LinkedList, sync::Arc, time::Duration};
 use serde_json::Value;
 use tokio::{
     select,
-    sync::{Mutex, mpsc, watch},
+    sync::{Mutex, mpsc},
 };
 
 use crate::{
-    common::BoxFuture,
+    common::{BoxFuture, ShutdownHandler},
     links::{
         LinkError::{self, InternalError},
         NodeId,
@@ -31,9 +31,8 @@ pub struct RetransmitForever {
     fair_loss_link: Arc<FairLossLink>,
     indications_tx: Mutex<Option<mpsc::Sender<SblDeliver>>>,
     outbox: Arc<Mutex<LinkedList<OutboxEntry>>>,
-    shutdown: Arc<Mutex<watch::Receiver<bool>>>,
-    shutdown_tx: Arc<watch::Sender<bool>>,
     retransmission_period: Duration,
+    shutdown_handler: ShutdownHandler,
 }
 
 impl StubbornLink<Value> for RetransmitForever {
@@ -61,7 +60,7 @@ impl StubbornLink<Value> for RetransmitForever {
 
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            self.shutdown_tx.send_replace(true);
+            self.shutdown_handler.shutdown().await;
             self.fair_loss_link.close().await;
         })
     }
@@ -75,7 +74,7 @@ impl RetransmitForever {
     pub fn new(retransmission_override: Option<Duration>, fair_loss_link: FairLossLink) -> Self {
         const DEFAULT_RETRANSMISSION_SECS: u64 = 5;
 
-        let (shutdown_tx, shutdown) = watch::channel(false);
+        let shutdown_handler = ShutdownHandler::new();
         let (indications_tx, indications) = mpsc::channel::<SblDeliver>(32);
 
         RetransmitForever {
@@ -83,18 +82,16 @@ impl RetransmitForever {
             outbox: Arc::new(Mutex::new(LinkedList::new())),
             indications: Arc::from(Mutex::new(indications)),
             indications_tx: Mutex::from(Some(indications_tx)),
-            shutdown: Arc::from(Mutex::from(shutdown)),
-            shutdown_tx: Arc::from(shutdown_tx),
+            shutdown_handler,
             retransmission_period: retransmission_override
                 .unwrap_or(Duration::from_secs(DEFAULT_RETRANSMISSION_SECS)),
         }
     }
 
     async fn retransmit(&self) -> Result<(), LinkError> {
-        let mut shutdown_watch = self.shutdown.lock().await;
         loop {
             select! {
-                _ = shutdown_watch.wait_for(|v| *v) => { break },
+                _ = self.shutdown_handler.wait() => { break },
                 _ = tokio::time::sleep(self.retransmission_period) => {}
             }
 
@@ -118,7 +115,8 @@ impl RetransmitForever {
 
     async fn handle_indications(&self) -> Result<(), LinkError> {
         let indications_tx = self.indications_tx.lock().await.take();
-        let mut fll_indications = self.fair_loss_link.indications.lock().await;
+        let fll_indications = self.fair_loss_link.get_indications();
+        let mut fll_indications = fll_indications.lock().await;
 
         while let (Some(fll_indication), Some(tx)) =
             (fll_indications.recv().await, indications_tx.as_ref())
