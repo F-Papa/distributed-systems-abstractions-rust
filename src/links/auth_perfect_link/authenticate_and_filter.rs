@@ -9,17 +9,9 @@ use uuid::{self, Uuid};
 
 use crate::common::BoxFuture;
 use crate::links::LinkError::MessageError;
-use crate::links::stubborn_link::{SblDeliver, StubbornLink};
+use crate::links::auth_perfect_link::{AplDeliver, AuthenticatedPerfectLink, bytes_to_sign};
+use crate::links::stubborn_link::{StubbornLink};
 use crate::links::{LinkError, NodeId};
-
-pub type AplDeliver = SblDeliver;
-
-pub trait AuthenticatedPerfectLink<T>: Send + Sync {
-    fn send(&self, payload: T, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn close(&self) -> BoxFuture<'_, ()>;
-    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<AplDeliver>>>;
-}
 
 impl AuthenticatedPerfectLink<Value> for AuthenticateAndFilter {
     fn send(&self, payload: Value, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>> {
@@ -28,7 +20,7 @@ impl AuthenticatedPerfectLink<Value> for AuthenticateAndFilter {
             let payload_bytes =
                 serde_json::to_vec(&payload).map_err(|e| MessageError(e.to_string()))?;
 
-            let to_sign = self.bytes_to_sign(&id, recipient, &payload_bytes);
+            let to_sign = bytes_to_sign(&id, recipient, &payload_bytes);
             let signature = self.signing_key.sign(&to_sign).to_bytes();
 
             let envelope = Envelope {
@@ -97,16 +89,6 @@ impl AuthenticateAndFilter {
         };
 
         Ok(perfect_link)
-    }
-
-    fn bytes_to_sign(&self, id: &Uuid, recipient: NodeId, payload: &[u8]) -> Vec<u8> {
-        let id_bytes = id.as_bytes();
-        let mut buf = Vec::with_capacity(id_bytes.len() + payload.len() + NodeId::ENCODED_LEN);
-
-        buf.extend_from_slice(&recipient.to_be_bytes()[..]);
-        buf.extend_from_slice(id_bytes);
-        buf.extend_from_slice(payload);
-        buf
     }
 
     async fn handle_indications(&self) -> Result<(), LinkError> {
@@ -179,7 +161,7 @@ impl AuthenticateAndFilter {
             }
         };
 
-        let bytes_to_verify = self.bytes_to_sign(&envelope.id, self.local_id, &payload_bytes);
+        let bytes_to_verify = bytes_to_sign(&envelope.id, self.local_id, &payload_bytes);
         let signature = match Signature::from_slice(&envelope.signature) {
             Ok(s) => s,
             Err(e) => {
