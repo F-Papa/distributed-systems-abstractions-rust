@@ -22,8 +22,8 @@ use crate::{
 };
 
 pub trait PerfectFailureDetector: Sync + Send {
-    fn start(self: &Arc<Self>) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn stop(self: &Arc<Self>) -> BoxFuture<'_, Result<(), LinkError>>;
+    fn start(&self) -> BoxFuture<'_, Result<(), LinkError>>;
+    fn stop(&self) -> BoxFuture<'_, Result<(), LinkError>>;
     fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<Crash>>>;
 }
 
@@ -48,7 +48,7 @@ enum PfdMessage {
 }
 
 impl PerfectFailureDetector for ExcludeOnTimeout {
-    fn start(self: &Arc<Self>) -> BoxFuture<'_, Result<(), LinkError>> {
+    fn start(&self) -> BoxFuture<'_, Result<(), LinkError>> {
         Box::pin(async move {
             tokio::try_join!(
                 self.perfect_link.listen(),
@@ -59,7 +59,7 @@ impl PerfectFailureDetector for ExcludeOnTimeout {
         })
     }
 
-    fn stop(self: &Arc<Self>) -> BoxFuture<'_, Result<(), LinkError>> {
+    fn stop(&self) -> BoxFuture<'_, Result<(), LinkError>> {
         Box::pin(async move {
             self.shutdown_handler.shutdown().await;
             self.perfect_link.close().await;
