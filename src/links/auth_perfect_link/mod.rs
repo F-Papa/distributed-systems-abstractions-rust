@@ -21,9 +21,6 @@ pub trait AuthenticatedPerfectLink<T>: Send + Sync {
     fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<AplDeliver>>>;
 }
 
-pub(crate) struct Authenticator {
-}
-
 pub(crate) fn bytes_to_sign(id: &Uuid, recipient: NodeId, payload: &[u8]) -> Vec<u8> {
     let id_bytes = id.as_bytes();
     let mut buf = Vec::with_capacity(id_bytes.len() + payload.len() + NodeId::ENCODED_LEN);
