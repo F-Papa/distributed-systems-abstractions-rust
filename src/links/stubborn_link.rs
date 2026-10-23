@@ -3,7 +3,10 @@ use std::{collections::LinkedList, sync::Arc, time::Duration};
 use serde_json::Value;
 use tokio::{
     select,
-    sync::{Mutex, mpsc},
+    sync::{
+        Mutex,
+        mpsc::{self, Receiver, Sender},
+    },
 };
 
 use crate::{
@@ -23,14 +26,14 @@ pub trait StubbornLink<T>: Send + Sync {
     fn send(&self, payload: T, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>>;
     fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>>;
     fn close(&self) -> BoxFuture<'_, ()>;
-    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<SblDeliver>>>;
+    fn get_indications(&self) -> Arc<Mutex<Receiver<SblDeliver>>>;
 }
 
 pub struct RetransmitForever {
-    indications: Arc<Mutex<mpsc::Receiver<SblDeliver>>>,
+    indications: Arc<Mutex<Receiver<SblDeliver>>>,
     fair_loss_link: Arc<FairLossLink>,
-    indications_tx: Mutex<Option<mpsc::Sender<SblDeliver>>>,
-    outbox: Arc<Mutex<LinkedList<OutboxEntry>>>,
+    indications_tx: Mutex<Option<Sender<SblDeliver>>>,
+    outbox: Arc<Mutex<Vec<OutboxEntry>>>,
     retransmission_period: Duration,
     shutdown_handler: ShutdownHandler,
 }
@@ -42,7 +45,7 @@ impl StubbornLink<Value> for RetransmitForever {
             self.outbox
                 .lock()
                 .await
-                .push_back((recipient, Arc::from(payload)));
+                .push((recipient, Arc::from(payload)));
             Ok(())
         })
     }
@@ -65,7 +68,7 @@ impl StubbornLink<Value> for RetransmitForever {
         })
     }
 
-    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<SblDeliver>>> {
+    fn get_indications(&self) -> Arc<Mutex<Receiver<SblDeliver>>> {
         Arc::clone(&self.indications)
     }
 }
@@ -73,13 +76,15 @@ impl StubbornLink<Value> for RetransmitForever {
 impl RetransmitForever {
     pub fn new(retransmission_override: Option<Duration>, fair_loss_link: FairLossLink) -> Self {
         const DEFAULT_RETRANSMISSION_SECS: u64 = 5;
+        const CHANNEL_BUFFER_SIZE: usize = 32;
+        const OUTBOX_INITIAL_CAPACITY: usize = 1024;
 
         let shutdown_handler = ShutdownHandler::new();
-        let (indications_tx, indications) = mpsc::channel::<SblDeliver>(32);
+        let (indications_tx, indications) = mpsc::channel::<SblDeliver>(CHANNEL_BUFFER_SIZE);
 
         RetransmitForever {
             fair_loss_link: Arc::from(fair_loss_link),
-            outbox: Arc::new(Mutex::new(LinkedList::new())),
+            outbox: Arc::new(Mutex::new(Vec::with_capacity(OUTBOX_INITIAL_CAPACITY))),
             indications: Arc::from(Mutex::new(indications)),
             indications_tx: Mutex::from(Some(indications_tx)),
             shutdown_handler,
