@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use ed25519_dalek::{self, Signature, Signer, Verifier, VerifyingKey};
 use log::debug;
 use serde::{Deserialize, Serialize};
@@ -7,43 +9,39 @@ use std::{collections::HashSet, sync::Arc};
 use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
-use crate::common::BoxFuture;
 use crate::links::LinkError::MessageError;
 use crate::links::auth_perfect_link::{AplDeliver, AuthenticatedPerfectLink, bytes_to_sign};
-use crate::links::stubborn_link::{StubbornLink};
+use crate::links::stubborn_link::StubbornLink;
 use crate::links::{LinkError, NodeId};
 
+#[async_trait]
 impl AuthenticatedPerfectLink<Value> for AuthenticateAndFilter {
-    fn send(&self, payload: Value, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            let id = uuid::Uuid::new_v4();
-            let payload_bytes =
-                serde_json::to_vec(&payload).map_err(|e| MessageError(e.to_string()))?;
+    async fn send(&self, payload: Value, recipient: NodeId) -> Result<(), LinkError> {
+        let id = uuid::Uuid::new_v4();
+        let payload_bytes =
+            serde_json::to_vec(&payload).map_err(|e| MessageError(e.to_string()))?;
 
-            let to_sign = bytes_to_sign(&id, recipient, &payload_bytes);
-            let signature = self.signing_key.sign(&to_sign).to_bytes();
+        let to_sign = bytes_to_sign(&id, recipient, &payload_bytes);
+        let signature = self.signing_key.sign(&to_sign).to_bytes();
 
-            let envelope = Envelope {
-                id,
-                signature: &signature[..],
-                payload,
-            };
+        let envelope = Envelope {
+            id,
+            signature: &signature[..],
+            payload,
+        };
 
-            let value = serde_json::to_value(envelope).map_err(|e| MessageError(e.to_string()))?;
-            self.stubborn_link.send(value, recipient).await?;
-            Ok(())
-        })
+        let value = serde_json::to_value(envelope).map_err(|e| MessageError(e.to_string()))?;
+        self.stubborn_link.send(value, recipient).await?;
+        Ok(())
     }
 
-    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            tokio::try_join!(self.stubborn_link.listen(), self.handle_indications())?;
-            Ok(())
-        })
+    async fn listen(&self) -> Result<(), LinkError> {
+        tokio::try_join!(self.stubborn_link.listen(), self.handle_indications())?;
+        Ok(())
     }
 
-    fn close(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async move { self.stubborn_link.close().await })
+    async fn close(&self) {
+        self.stubborn_link.close().await
     }
 
     fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<AplDeliver>>> {

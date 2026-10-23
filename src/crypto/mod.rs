@@ -2,7 +2,7 @@ use std::fs;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
-use crate::links::NodeId;
+use crate::common::NodeId;
 
 pub fn get_signing_key(id: NodeId) -> Result<SigningKey, String> {
     let path = format!("keys/node{}", id.get());

@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -18,7 +20,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    common::{BoxFuture, ShutdownHandler},
+    common::ShutdownHandler,
     links::{
         self,
         LinkError::{self, InternalError, MessageError},
@@ -153,58 +155,49 @@ impl AcknowledgeMessages {
     }
 }
 
+#[async_trait]
 impl PerfectLink<Value> for AcknowledgeMessages {
-    fn send(
-        &self,
-        payload: Value,
-        recipient: links::NodeId,
-    ) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            let envelope = Envelope {
-                payload,
-                recipient,
-                id: Uuid::new_v4(),
-            };
+    async fn send(&self, payload: Value, recipient: links::NodeId) -> Result<(), LinkError> {
+        let envelope = Envelope {
+            payload,
+            recipient,
+            id: Uuid::new_v4(),
+        };
 
-            let encoded_envelope =
-                serde_json::to_value(&envelope).map_err(|e| MessageError(e.to_string()))?;
+        let encoded_envelope =
+            serde_json::to_value(&envelope).map_err(|e| MessageError(e.to_string()))?;
 
-            let encoded_message = serde_json::to_value(&ProtocolMessage::Data(encoded_envelope))
-                .map_err(|e| MessageError(e.to_string()))?;
+        let encoded_message = serde_json::to_value(&ProtocolMessage::Data(encoded_envelope))
+            .map_err(|e| MessageError(e.to_string()))?;
 
-            let key = (recipient, envelope.id);
-            let encoded_message = Arc::from(encoded_message);
+        let key = (recipient, envelope.id);
+        let encoded_message = Arc::from(encoded_message);
 
-            self.outbox
-                .lock()
-                .await
-                .insert(key, Arc::clone(&encoded_message));
+        self.outbox
+            .lock()
+            .await
+            .insert(key, Arc::clone(&encoded_message));
 
-            if let Err(error) = self.fair_loss_link.send(&encoded_message, recipient).await {
-                self.outbox.lock().await.remove(&key);
-                return Err(error);
-            }
+        if let Err(error) = self.fair_loss_link.send(&encoded_message, recipient).await {
+            self.outbox.lock().await.remove(&key);
+            return Err(error);
+        }
 
-            Ok(())
-        })
+        Ok(())
     }
 
-    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            try_join!(
-                self.fair_loss_link.listen(),
-                self.handle_fll_indications(),
-                self.retransmit()
-            )?;
-            Ok(())
-        })
+    async fn listen(&self) -> Result<(), LinkError> {
+        try_join!(
+            self.fair_loss_link.listen(),
+            self.handle_fll_indications(),
+            self.retransmit()
+        )?;
+        Ok(())
     }
 
-    fn close(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async move {
-            self.shutdown_handler.shutdown().await;
-            self.fair_loss_link.close().await;
-        })
+    async fn close(&self) {
+        self.shutdown_handler.shutdown().await;
+        self.fair_loss_link.close().await;
     }
 
     fn get_indications(&self) -> Arc<sync::Mutex<Receiver<super::PlDeliver>>> {

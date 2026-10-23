@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use crate::links::{
-    LocalhostResolver, NodeId,
+use crate::{common::NodeId, links::{
+    LocalhostResolver,
     fair_loss_link::FairLossLink,
     perfect_link::{AcknowledgeMessages, PerfectLink},
-};
+}};
 
 pub mod common;
 pub mod crypto;

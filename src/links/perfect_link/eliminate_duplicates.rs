@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use log::debug;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -5,7 +7,6 @@ use std::{collections::HashSet, sync::Arc};
 use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
-use crate::common::BoxFuture;
 use crate::links::LinkError::MessageError;
 use crate::links::perfect_link::{PerfectLink, PlDeliver};
 use crate::links::stubborn_link::StubbornLink;
@@ -24,30 +25,27 @@ struct Envelope<T> {
     payload: T,
 }
 
+#[async_trait]
 impl PerfectLink<Value> for EliminateDuplicates {
-    fn send(&self, payload: Value, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            let envelope = Envelope {
-                id: Uuid::new_v4(),
-                payload,
-            };
+    async fn send(&self, payload: Value, recipient: NodeId) -> Result<(), LinkError> {
+        let envelope = Envelope {
+            id: Uuid::new_v4(),
+            payload,
+        };
 
-            let bytes = serde_json::to_value(&envelope).map_err(|e| MessageError(e.to_string()))?;
-            self.stubborn_link.send(bytes, recipient).await
-        })
+        let bytes = serde_json::to_value(&envelope).map_err(|e| MessageError(e.to_string()))?;
+        self.stubborn_link.send(bytes, recipient).await
     }
 
-    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            let stubborn_link_cpy = Arc::clone(&self.stubborn_link);
-            tokio::try_join!(stubborn_link_cpy.listen(), self.handle_indications())?;
-            debug!("finished");
-            Ok(())
-        })
+    async fn listen(&self) -> Result<(), LinkError> {
+        let stubborn_link_cpy = Arc::clone(&self.stubborn_link);
+        tokio::try_join!(stubborn_link_cpy.listen(), self.handle_indications())?;
+        debug!("finished");
+        Ok(())
     }
 
-    fn close(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async move { self.stubborn_link.close().await })
+    async fn close(&self) {
+        self.stubborn_link.close().await
     }
 
     fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<PlDeliver>>> {

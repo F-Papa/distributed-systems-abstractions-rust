@@ -1,4 +1,6 @@
-use std::{collections::LinkedList, sync::Arc, time::Duration};
+use async_trait::async_trait;
+
+use std::{sync::Arc, time::Duration};
 
 use serde_json::Value;
 use tokio::{
@@ -10,10 +12,8 @@ use tokio::{
 };
 
 use crate::{
-    common::{BoxFuture, ShutdownHandler},
-    links::{
+    common::{NodeId, ShutdownHandler}, links::{
         LinkError::{self, InternalError},
-        NodeId,
         fair_loss_link::{FairLossLink, FllDeliver},
     },
 };
@@ -22,10 +22,11 @@ type OutboxEntry = (NodeId, Arc<Value>);
 
 pub type SblDeliver = FllDeliver;
 
+#[async_trait]
 pub trait StubbornLink<T>: Send + Sync {
-    fn send(&self, payload: T, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn close(&self) -> BoxFuture<'_, ()>;
+    async fn send(&self, payload: T, recipient: NodeId) -> Result<(), LinkError>;
+    async fn listen(&self) -> Result<(), LinkError>;
+    async fn close(&self);
     fn get_indications(&self) -> Arc<Mutex<Receiver<SblDeliver>>>;
 }
 
@@ -38,34 +39,29 @@ pub struct RetransmitForever {
     shutdown_handler: ShutdownHandler,
 }
 
+#[async_trait]
 impl StubbornLink<Value> for RetransmitForever {
-    fn send(&self, payload: Value, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            self.fair_loss_link.send(&payload, recipient).await?;
-            self.outbox
-                .lock()
-                .await
-                .push((recipient, Arc::from(payload)));
-            Ok(())
-        })
+    async fn send(&self, payload: Value, recipient: NodeId) -> Result<(), LinkError> {
+        self.fair_loss_link.send(&payload, recipient).await?;
+        self.outbox
+            .lock()
+            .await
+            .push((recipient, Arc::from(payload)));
+        Ok(())
     }
 
-    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            tokio::try_join!(
-                self.retransmit(),
-                self.fair_loss_link.listen(),
-                self.handle_indications()
-            )?;
-            Ok(())
-        })
+    async fn listen(&self) -> Result<(), LinkError> {
+        tokio::try_join!(
+            self.retransmit(),
+            self.fair_loss_link.listen(),
+            self.handle_indications()
+        )?;
+        Ok(())
     }
 
-    fn close(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async move {
-            self.shutdown_handler.shutdown().await;
-            self.fair_loss_link.close().await;
-        })
+    async fn close(&self) {
+        self.shutdown_handler.shutdown().await;
+        self.fair_loss_link.close().await;
     }
 
     fn get_indications(&self) -> Arc<Mutex<Receiver<SblDeliver>>> {

@@ -1,11 +1,10 @@
+use async_trait::async_trait;
+
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, mpsc};
 
-use crate::{
-    common::BoxFuture,
-    links::{LinkError, NodeId, stubborn_link::SblDeliver},
-};
+use crate::links::{LinkError, NodeId, stubborn_link::SblDeliver};
 
 mod eliminate_duplicates;
 pub use eliminate_duplicates::EliminateDuplicates;
@@ -15,9 +14,10 @@ pub use acknowledge_messages::AcknowledgeMessages;
 
 pub type PlDeliver = SblDeliver;
 
+#[async_trait]
 pub trait PerfectLink<T>: Send + Sync {
-    fn send(&self, payload: T, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn close(&self) -> BoxFuture<'_, ()>;
+    async fn send(&self, payload: T, recipient: NodeId) -> Result<(), LinkError>;
+    async fn listen(&self) -> Result<(), LinkError>;
+    async fn close(&self);
     fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<PlDeliver>>>;
 }

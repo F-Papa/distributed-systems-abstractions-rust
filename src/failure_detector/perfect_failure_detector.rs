@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use log::debug;
@@ -12,18 +14,18 @@ use tokio::{
 };
 
 use crate::{
-    common::{BoxFuture, ShutdownHandler},
-    links::{LinkError, perfect_link::PerfectLink},
+    common::{NodeId, ShutdownHandler}, links::{LinkError, perfect_link::PerfectLink},
 };
 
 use crate::{
     failure_detector::perfect_failure_detector::PfdMessage::{HeartReply, HeartbeatRequest},
-    links::{LinkError::MessageError, NodeId},
+    links::{LinkError::MessageError},
 };
 
+#[async_trait]
 pub trait PerfectFailureDetector: Sync + Send {
-    fn start(&self) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn stop(&self) -> BoxFuture<'_, Result<(), LinkError>>;
+    async fn start(&self) -> Result<(), LinkError>;
+    async fn stop(&self) -> Result<(), LinkError>;
     fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<Crash>>>;
 }
 
@@ -47,24 +49,21 @@ enum PfdMessage {
     HeartReply,
 }
 
+#[async_trait]
 impl PerfectFailureDetector for ExcludeOnTimeout {
-    fn start(&self) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            tokio::try_join!(
-                self.perfect_link.listen(),
-                self.handle_timeout(),
-                self.handle_link_indications()
-            )?;
-            Ok(())
-        })
+    async fn start(&self) -> Result<(), LinkError> {
+        tokio::try_join!(
+            self.perfect_link.listen(),
+            self.handle_timeout(),
+            self.handle_link_indications()
+        )?;
+        Ok(())
     }
 
-    fn stop(&self) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            self.shutdown_handler.shutdown().await;
-            self.perfect_link.close().await;
-            Ok(())
-        })
+    async fn stop(&self) -> Result<(), LinkError> {
+        self.shutdown_handler.shutdown().await;
+        self.perfect_link.close().await;
+        Ok(())
     }
 
     fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<Crash>>> {

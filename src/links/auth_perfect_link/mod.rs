@@ -1,8 +1,9 @@
+use async_trait::async_trait;
+
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
-use crate::common::BoxFuture;
 use crate::links::stubborn_link::SblDeliver;
 use crate::links::{LinkError, NodeId};
 
@@ -14,10 +15,11 @@ pub use authenticate_and_filter::AuthenticateAndFilter;
 mod sign_and_acknowledge;
 pub use sign_and_acknowledge::SignAndAcknowledge;
 
+#[async_trait]
 pub trait AuthenticatedPerfectLink<T>: Send + Sync {
-    fn send(&self, payload: T, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>>;
-    fn close(&self) -> BoxFuture<'_, ()>;
+    async fn send(&self, payload: T, recipient: NodeId) -> Result<(), LinkError>;
+    async fn listen(&self) -> Result<(), LinkError>;
+    async fn close(&self);
     fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<AplDeliver>>>;
 }
 

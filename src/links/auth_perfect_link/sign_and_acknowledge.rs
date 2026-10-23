@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -16,7 +18,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    common::{BoxFuture, ShutdownHandler},
+    common::ShutdownHandler,
     links::{
         LinkError::{self, InternalError, MessageError},
         NodeId,
@@ -208,49 +210,44 @@ impl SignAndAcknowledge {
     }
 }
 
+#[async_trait]
 impl AuthenticatedPerfectLink<Value> for SignAndAcknowledge {
-    fn send(&self, payload: Value, recipient: NodeId) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            let (id, encoded_message) =
-                self.encode_message(ProtocolMessage::Data(payload), recipient)?;
-            let key = (recipient, id);
-            let encoded_message = Arc::from(encoded_message);
+    async fn send(&self, payload: Value, recipient: NodeId) -> Result<(), LinkError> {
+        let (id, encoded_message) =
+            self.encode_message(ProtocolMessage::Data(payload), recipient)?;
+        let key = (recipient, id);
+        let encoded_message = Arc::from(encoded_message);
 
-            self.outbox
-                .lock()
-                .await
-                .insert(key, Arc::clone(&encoded_message));
+        self.outbox
+            .lock()
+            .await
+            .insert(key, Arc::clone(&encoded_message));
 
-            if let Err(error) = self.fair_loss_link.send(&encoded_message, recipient).await {
-                self.outbox.lock().await.remove(&key);
-                return Err(error);
-            }
+        if let Err(error) = self.fair_loss_link.send(&encoded_message, recipient).await {
+            self.outbox.lock().await.remove(&key);
+            return Err(error);
+        }
 
-            Ok(())
-        })
+        Ok(())
     }
 
-    fn listen(&self) -> BoxFuture<'_, Result<(), LinkError>> {
-        Box::pin(async move {
-            select! {
-                _ = self.shutdown_handler.wait() => {}
-                result = async {
-                    try_join!(
-                        self.fair_loss_link.listen(),
-                        self.handle_fll_indications(),
-                        self.retransmit()
-                    )
-                } => { result?; }
-            }
-            Ok(())
-        })
+    async fn listen(&self) -> Result<(), LinkError> {
+        select! {
+            _ = self.shutdown_handler.wait() => {}
+            result = async {
+                try_join!(
+                    self.fair_loss_link.listen(),
+                    self.handle_fll_indications(),
+                    self.retransmit()
+                )
+            } => { result?; }
+        }
+        Ok(())
     }
 
-    fn close(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async move {
-            self.shutdown_handler.shutdown().await;
-            self.fair_loss_link.close().await;
-        })
+    async fn close(&self) {
+        self.shutdown_handler.shutdown().await;
+        self.fair_loss_link.close().await;
     }
 
     fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<AplDeliver>>> {

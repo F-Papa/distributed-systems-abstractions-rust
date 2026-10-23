@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::links::NodeId;
+use crate::common::NodeId;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum EpfdIndication {
