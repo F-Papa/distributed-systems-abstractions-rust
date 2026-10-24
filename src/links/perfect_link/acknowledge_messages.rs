@@ -115,11 +115,7 @@ impl AcknowledgeMessages {
             let message: ProtocolMessage = match serde_json::from_value(fll_deliver.message) {
                 Ok(e) => e,
                 Err(e) => {
-                    debug!(
-                        "Invalid message from {}: {}",
-                        fll_deliver.sender,
-                        e.to_string()
-                    );
+                    debug!("Invalid message from {}: {}", fll_deliver.sender, e);
                     continue;
                 }
             };
@@ -135,7 +131,7 @@ impl AcknowledgeMessages {
             let envelope: Envelope<Value> = match serde_json::from_value(value) {
                 Ok(e) => e,
                 Err(e) => {
-                    debug!("could not deserialize envelope: {}", e.to_string());
+                    debug!("could not deserialize envelope: {}", e);
                     continue;
                 }
             };
@@ -169,7 +165,7 @@ impl PerfectLink<Value> for AcknowledgeMessages {
         let encoded_envelope =
             serde_json::to_value(&envelope).map_err(|e| MessageError(e.to_string()))?;
 
-        let encoded_message = serde_json::to_value(&ProtocolMessage::Data(encoded_envelope))
+        let encoded_message = serde_json::to_value(ProtocolMessage::Data(encoded_envelope))
             .map_err(|e| MessageError(e.to_string()))?;
 
         let key = (recipient, envelope.id);
