@@ -1,14 +1,13 @@
-use std::{fmt::format, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
 
 use log::debug;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::{
     fs::{self, create_dir_all, rename},
     io::{AsyncReadExt, AsyncWriteExt},
-    net::unix::pipe::Sender,
     sync::{Mutex, mpsc},
 };
 use uuid::Uuid;

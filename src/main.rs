@@ -2,13 +2,11 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     common::NodeId,
-    failure_detector::eventually_perfect_failure_detector::{
-        EpfdMessageIndication, EventuallyPerfectFailureDetector, IncreasingTimeout,
-    },
+    failure_detector::eventually_perfect_failure_detector::EventuallyPerfectFailureDetector,
     links::{
         LinkError, LocalhostResolver,
         fair_loss_link::FairLossLink,
-        logged_perfect_link::{CommitAndAcknowledge, LoggedPerfectLink, LplDeliver},
+        logged_perfect_link::{CommitAndAcknowledge, LoggedPerfectLink},
         perfect_link::AcknowledgeMessages,
     },
 };
@@ -35,7 +33,7 @@ async fn main() {
 
     let nodes: HashSet<NodeId> = (1..=n_peers).map(NodeId::from).collect();
 
-    let peers: HashSet<NodeId> = nodes
+    let _peers: HashSet<NodeId> = nodes
         .clone()
         .into_iter()
         .filter(|id| *id != local_rank)

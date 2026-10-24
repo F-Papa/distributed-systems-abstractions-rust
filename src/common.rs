@@ -8,6 +8,12 @@ pub struct ShutdownHandler {
     receiver: Mutex<watch::Receiver<bool>>,
 }
 
+impl Default for ShutdownHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShutdownHandler {
     pub fn new() -> Self {
         let (sender, receiver) = watch::channel(false);
