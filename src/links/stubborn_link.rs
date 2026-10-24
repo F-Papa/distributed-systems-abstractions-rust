@@ -12,7 +12,8 @@ use tokio::{
 };
 
 use crate::{
-    common::{NodeId, ShutdownHandler}, links::{
+    common::{NodeId, ShutdownHandler},
+    links::{
         LinkError::{self, InternalError},
         fair_loss_link::{FairLossLink, FllDeliver},
     },
@@ -27,11 +28,12 @@ pub trait StubbornLink<T>: Send + Sync {
     async fn send(&self, payload: T, recipient: NodeId) -> Result<(), LinkError>;
     async fn listen(&self) -> Result<(), LinkError>;
     async fn close(&self);
-    fn get_indications(&self) -> Arc<Mutex<Receiver<SblDeliver>>>;
+    /// Transfers the receiver to its consumer. Returns `None` after the first take.
+    async fn take_indications(&self) -> Option<Receiver<SblDeliver>>;
 }
 
 pub struct RetransmitForever {
-    indications: Arc<Mutex<Receiver<SblDeliver>>>,
+    indications: Mutex<Option<Receiver<SblDeliver>>>,
     fair_loss_link: Arc<FairLossLink>,
     indications_tx: Mutex<Option<Sender<SblDeliver>>>,
     outbox: Arc<Mutex<Vec<OutboxEntry>>>,
@@ -64,8 +66,8 @@ impl StubbornLink<Value> for RetransmitForever {
         self.fair_loss_link.close().await;
     }
 
-    fn get_indications(&self) -> Arc<Mutex<Receiver<SblDeliver>>> {
-        Arc::clone(&self.indications)
+    async fn take_indications(&self) -> Option<Receiver<SblDeliver>> {
+        self.indications.lock().await.take()
     }
 }
 
@@ -81,7 +83,7 @@ impl RetransmitForever {
         RetransmitForever {
             fair_loss_link: Arc::from(fair_loss_link),
             outbox: Arc::new(Mutex::new(Vec::with_capacity(OUTBOX_INITIAL_CAPACITY))),
-            indications: Arc::from(Mutex::new(indications)),
+            indications: Mutex::new(Some(indications)),
             indications_tx: Mutex::from(Some(indications_tx)),
             shutdown_handler,
             retransmission_period: retransmission_override
@@ -116,8 +118,11 @@ impl RetransmitForever {
 
     async fn handle_indications(&self) -> Result<(), LinkError> {
         let indications_tx = self.indications_tx.lock().await.take();
-        let fll_indications = self.fair_loss_link.get_indications();
-        let mut fll_indications = fll_indications.lock().await;
+        let mut fll_indications = self
+            .fair_loss_link
+            .take_indications()
+            .await
+            .ok_or_else(|| LinkError::InternalError("indications receiver already taken".into()))?;
 
         while let (Some(fll_indication), Some(tx)) =
             (fll_indications.recv().await, indications_tx.as_ref())

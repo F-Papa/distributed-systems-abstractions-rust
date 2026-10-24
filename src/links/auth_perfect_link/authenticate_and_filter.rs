@@ -44,15 +44,15 @@ impl AuthenticatedPerfectLink<Value> for AuthenticateAndFilter {
         self.stubborn_link.close().await
     }
 
-    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<AplDeliver>>> {
-        Arc::clone(&self.indications)
+    async fn take_indications(&self) -> Option<mpsc::Receiver<AplDeliver>> {
+        self.indications.lock().await.take()
     }
 }
 
 pub struct AuthenticateAndFilter {
     local_id: NodeId,
     stubborn_link: Arc<dyn StubbornLink<Value>>,
-    indications: Arc<Mutex<mpsc::Receiver<AplDeliver>>>,
+    indications: Mutex<Option<mpsc::Receiver<AplDeliver>>>,
     indications_tx: Mutex<Option<mpsc::Sender<AplDeliver>>>,
     inbox: Arc<Mutex<HashSet<Uuid>>>,
     signing_key: ed25519_dalek::SigningKey,
@@ -79,7 +79,7 @@ impl AuthenticateAndFilter {
         let perfect_link = AuthenticateAndFilter {
             local_id,
             stubborn_link,
-            indications: Arc::from(Mutex::from(rx)),
+            indications: Mutex::new(Some(rx)),
             indications_tx: Mutex::from(Some(tx)),
             inbox,
             signing_key,
@@ -95,9 +95,10 @@ impl AuthenticateAndFilter {
             Some(tx) => tx,
         };
 
-        let sbl_indications = self.stubborn_link.get_indications();
-
-        let mut sbl_indications = sbl_indications.lock().await;
+        let mut sbl_indications =
+            self.stubborn_link.take_indications().await.ok_or_else(|| {
+                LinkError::InternalError("indications receiver already taken".into())
+            })?;
         let mut inbox = self.inbox.lock().await;
 
         loop {

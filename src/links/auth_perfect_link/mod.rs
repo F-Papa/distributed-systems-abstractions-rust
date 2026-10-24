@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 
-use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::links::stubborn_link::SblDeliver;
@@ -20,7 +19,8 @@ pub trait AuthenticatedPerfectLink<T>: Send + Sync {
     async fn send(&self, payload: T, recipient: NodeId) -> Result<(), LinkError>;
     async fn listen(&self) -> Result<(), LinkError>;
     async fn close(&self);
-    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<AplDeliver>>>;
+    /// Transfers the receiver to its consumer. Returns `None` after the first take.
+    async fn take_indications(&self) -> Option<mpsc::Receiver<AplDeliver>>;
 }
 
 pub(crate) fn bytes_to_sign(id: &Uuid, recipient: NodeId, payload: &[u8]) -> Vec<u8> {

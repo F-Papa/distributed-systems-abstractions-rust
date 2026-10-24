@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio::{
     select,
     sync::{
-        self, Mutex,
+        Mutex,
         mpsc::{self, Receiver},
     },
     time, try_join,
@@ -34,7 +34,7 @@ pub struct AcknowledgeMessages {
     fair_loss_link: Arc<FairLossLink>,
     outbox: Arc<Mutex<HashMap<(NodeId, Uuid), Arc<Value>>>>,
     inbox: Arc<Mutex<HashSet<(NodeId, Uuid)>>>,
-    indications: Arc<Mutex<mpsc::Receiver<PlDeliver>>>,
+    indications: Mutex<Option<mpsc::Receiver<PlDeliver>>>,
     indications_tx: Arc<mpsc::Sender<PlDeliver>>,
     retransmission_period: Duration,
     shutdown_handler: ShutdownHandler,
@@ -70,7 +70,7 @@ impl AcknowledgeMessages {
             fair_loss_link: Arc::from(fair_loss_link),
             outbox: Arc::from(Mutex::from(HashMap::new())),
             inbox: Arc::from(Mutex::from(HashSet::new())),
-            indications: Arc::from(Mutex::from(indications)),
+            indications: Mutex::new(Some(indications)),
             indications_tx: Arc::from(indications_tx),
             retransmission_period: retransmission_override
                 .unwrap_or(Duration::from_secs(DEFAULT_RETRANSMISSION_SECS)),
@@ -104,9 +104,11 @@ impl AcknowledgeMessages {
     }
 
     async fn handle_fll_indications(&self) -> Result<(), LinkError> {
-        let fll_indications = self.fair_loss_link.get_indications();
-
-        let mut fll_indications = fll_indications.lock().await;
+        let mut fll_indications = self
+            .fair_loss_link
+            .take_indications()
+            .await
+            .ok_or_else(|| LinkError::InternalError("indications receiver already taken".into()))?;
         let mut received_keys = self.inbox.lock().await;
 
         while let Some(fll_deliver) = fll_indications.recv().await {
@@ -200,7 +202,7 @@ impl PerfectLink<Value> for AcknowledgeMessages {
         self.fair_loss_link.close().await;
     }
 
-    fn get_indications(&self) -> Arc<sync::Mutex<Receiver<super::PlDeliver>>> {
-        Arc::clone(&self.indications)
+    async fn take_indications(&self) -> Option<Receiver<super::PlDeliver>> {
+        self.indications.lock().await.take()
     }
 }

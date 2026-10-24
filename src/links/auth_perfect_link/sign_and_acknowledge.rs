@@ -32,7 +32,7 @@ pub struct SignAndAcknowledge {
     fair_loss_link: Arc<FairLossLink>,
     outbox: Arc<Mutex<HashMap<(NodeId, Uuid), Arc<Value>>>>,
     inbox: Arc<Mutex<HashSet<(NodeId, Uuid)>>>,
-    indications: Arc<Mutex<mpsc::Receiver<AplDeliver>>>,
+    indications: Mutex<Option<mpsc::Receiver<AplDeliver>>>,
     indications_tx: Arc<mpsc::Sender<AplDeliver>>,
     retransmission_period: Duration,
     shutdown_handler: ShutdownHandler,
@@ -72,7 +72,7 @@ impl SignAndAcknowledge {
             fair_loss_link: Arc::from(fair_loss_link),
             outbox: Arc::from(Mutex::from(HashMap::new())),
             inbox: Arc::from(Mutex::from(HashSet::new())),
-            indications: Arc::from(Mutex::from(indications)),
+            indications: Mutex::new(Some(indications)),
             indications_tx: Arc::from(indications_tx),
             retransmission_period: retransmission_override
                 .unwrap_or(Duration::from_secs(DEFAULT_RETRANSMISSION_SECS)),
@@ -163,8 +163,11 @@ impl SignAndAcknowledge {
     }
 
     async fn handle_fll_indications(&self) -> Result<(), LinkError> {
-        let fll_indications = self.fair_loss_link.get_indications();
-        let mut fll_indications = fll_indications.lock().await;
+        let mut fll_indications = self
+            .fair_loss_link
+            .take_indications()
+            .await
+            .ok_or_else(|| LinkError::InternalError("indications receiver already taken".into()))?;
         let mut received_keys = self.inbox.lock().await;
 
         while let Some(fll_deliver) = fll_indications.recv().await {
@@ -250,7 +253,7 @@ impl AuthenticatedPerfectLink<Value> for SignAndAcknowledge {
         self.fair_loss_link.close().await;
     }
 
-    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<AplDeliver>>> {
-        Arc::clone(&self.indications)
+    async fn take_indications(&self) -> Option<mpsc::Receiver<AplDeliver>> {
+        self.indications.lock().await.take()
     }
 }

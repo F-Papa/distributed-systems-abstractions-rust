@@ -1,14 +1,18 @@
 use std::sync::Arc;
 
-use crate::{common::NodeId, links::{
-    LocalhostResolver,
-    fair_loss_link::FairLossLink,
-    perfect_link::{AcknowledgeMessages, PerfectLink},
-}};
+use crate::{
+    common::NodeId,
+    links::{
+        LocalhostResolver,
+        fair_loss_link::FairLossLink,
+        perfect_link::{AcknowledgeMessages, PerfectLink},
+    },
+};
 
 pub mod common;
 pub mod crypto;
 pub mod failure_detector;
+pub mod leader_election;
 pub mod links;
 
 #[tokio::main]
@@ -38,8 +42,10 @@ async fn main() {
 
     let pl_copy = Arc::clone(&pl);
     let handle_indications = async move {
-        let indications = pl_copy.get_indications();
-        let mut indications = indications.lock().await;
+        let mut indications = pl_copy
+            .take_indications()
+            .await
+            .expect("indications receiver already taken");
         loop {
             match indications.recv().await {
                 None => break,

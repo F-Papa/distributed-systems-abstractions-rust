@@ -14,7 +14,7 @@ use crate::links::{LinkError, NodeId};
 
 pub struct EliminateDuplicates {
     stubborn_link: Arc<dyn StubbornLink<Value>>,
-    indications: Arc<Mutex<mpsc::Receiver<PlDeliver>>>,
+    indications: Mutex<Option<mpsc::Receiver<PlDeliver>>>,
     indications_tx: Mutex<Option<mpsc::Sender<PlDeliver>>>,
     inbox: Arc<Mutex<HashSet<Uuid>>>,
 }
@@ -48,8 +48,8 @@ impl PerfectLink<Value> for EliminateDuplicates {
         self.stubborn_link.close().await
     }
 
-    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<PlDeliver>>> {
-        Arc::clone(&self.indications)
+    async fn take_indications(&self) -> Option<mpsc::Receiver<PlDeliver>> {
+        self.indications.lock().await.take()
     }
 }
 
@@ -60,16 +60,17 @@ impl EliminateDuplicates {
 
         Self {
             stubborn_link,
-            indications: Arc::from(Mutex::from(indications)),
+            indications: Mutex::new(Some(indications)),
             indications_tx: Mutex::from(Some(indications_tx)),
             inbox,
         }
     }
 
     async fn handle_indications(&self) -> Result<(), LinkError> {
-        let stubborn_link_indications = Arc::clone(&self.stubborn_link.get_indications());
-
-        let mut sbl_indications = stubborn_link_indications.lock().await;
+        let mut sbl_indications =
+            self.stubborn_link.take_indications().await.ok_or_else(|| {
+                LinkError::InternalError("indications receiver already taken".into())
+            })?;
         let mut indications_tx = self.indications_tx.lock().await;
         let mut inbox = self.inbox.lock().await;
         loop {

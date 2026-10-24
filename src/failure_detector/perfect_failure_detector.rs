@@ -14,19 +14,21 @@ use tokio::{
 };
 
 use crate::{
-    common::{NodeId, ShutdownHandler}, links::{LinkError, perfect_link::PerfectLink},
+    common::{NodeId, ShutdownHandler},
+    links::{LinkError, perfect_link::PerfectLink},
 };
 
 use crate::{
     failure_detector::perfect_failure_detector::PfdMessage::{HeartReply, HeartbeatRequest},
-    links::{LinkError::MessageError},
+    links::LinkError::MessageError,
 };
 
 #[async_trait]
 pub trait PerfectFailureDetector: Sync + Send {
     async fn start(&self) -> Result<(), LinkError>;
     async fn stop(&self) -> Result<(), LinkError>;
-    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<Crash>>>;
+    /// Transfers the receiver to its consumer. Returns `None` after the first take.
+    async fn take_indications(&self) -> Option<mpsc::Receiver<Crash>>;
 }
 
 pub struct Crash {
@@ -38,7 +40,7 @@ pub struct ExcludeOnTimeout {
     alive: Mutex<HashSet<NodeId>>,
     detected: Mutex<HashSet<NodeId>>,
     perfect_link: Arc<dyn PerfectLink<Value>>,
-    indications: Arc<Mutex<mpsc::Receiver<Crash>>>,
+    indications: Mutex<Option<mpsc::Receiver<Crash>>>,
     indications_tx: Mutex<Option<mpsc::Sender<Crash>>>,
     shutdown_handler: ShutdownHandler,
 }
@@ -66,8 +68,8 @@ impl PerfectFailureDetector for ExcludeOnTimeout {
         Ok(())
     }
 
-    fn get_indications(&self) -> Arc<Mutex<mpsc::Receiver<Crash>>> {
-        Arc::clone(&self.indications)
+    async fn take_indications(&self) -> Option<mpsc::Receiver<Crash>> {
+        self.indications.lock().await.take()
     }
 }
 
@@ -80,15 +82,17 @@ impl ExcludeOnTimeout {
             alive: Mutex::new(peers.clone()),
             detected: Mutex::new(HashSet::new()),
             perfect_link,
-            indications: Arc::from(Mutex::from(indications_rx)),
+            indications: Mutex::new(Some(indications_rx)),
             indications_tx: Mutex::new(Some(indications_tx)),
             shutdown_handler: ShutdownHandler::new(),
         }
     }
 
     async fn handle_link_indications(&self) -> Result<(), LinkError> {
-        let pl_indications = self.perfect_link.get_indications();
-        let mut indications = pl_indications.lock().await;
+        let mut indications =
+            self.perfect_link.take_indications().await.ok_or_else(|| {
+                LinkError::InternalError("indications receiver already taken".into())
+            })?;
 
         while let Some(deliver) = indications.recv().await {
             match serde_json::from_value(deliver.message) {
