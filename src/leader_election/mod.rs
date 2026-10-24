@@ -10,8 +10,6 @@ use crate::{
     links::LinkError::{self, InternalError},
 };
 
-pub mod monarchical_leader_election;
-
 pub struct Leader {
     pub node_id: NodeId,
 }
