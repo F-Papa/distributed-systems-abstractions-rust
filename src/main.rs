@@ -2,15 +2,13 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     common::NodeId,
-    failure_detector::{
-        perfect_failure_detector::ExcludeOnTimeout,
-        eventually_perfect_failure_detector::{
-            EpfdMessageIndication, EventuallyPerfectFailureDetector, IncreasingTimeout,
-        },
+    failure_detector::eventually_perfect_failure_detector::{
+        EpfdMessageIndication, EventuallyPerfectFailureDetector, IncreasingTimeout,
     },
-    leader_election::{LeaderElection, MonarchicalLeaderElection},
     links::{
-        LinkError, LocalhostResolver, fair_loss_link::FairLossLink,
+        LinkError, LocalhostResolver,
+        fair_loss_link::FairLossLink,
+        logged_perfect_link::{CommitAndAcknowledge, LoggedPerfectLink, LplDeliver},
         perfect_link::AcknowledgeMessages,
     },
 };
@@ -48,19 +46,28 @@ async fn main() {
         .expect("fair_loss_link");
 
     let pl = Arc::from(AcknowledgeMessages::new(fll, None));
-    let epfd = Arc::from(IncreasingTimeout::new(peers, pl));
+    let lpl = Arc::from(CommitAndAcknowledge::new(local_rank, pl, None));
 
-    let mut i = epfd.take_indications().await.take().unwrap();
+    let mut i = lpl.take_indications().await.take().unwrap();
     let h = async move {
         while let Some(i) = i.recv().await {
-            match i {
-                EpfdMessageIndication::Suspect(node_id) => println!("Suspect {}", node_id),
-                EpfdMessageIndication::Restore(node_id) => println!("Restore {}", node_id),
-            }
+            println!("Delivered: {:?}", i.delivered);
         }
         let res: Result<(), LinkError> = Ok(());
         res
     };
 
-    tokio::try_join!(epfd.start(), h).unwrap();
+    let lpl_cpy = Arc::clone(&lpl);
+    let send = async move {
+        let mut counter = 1;
+        while counter < 5 {
+            counter +=1 ;
+            let msg = format!("Message number {counter}");
+            let value = serde_json::to_value(msg).unwrap();
+            lpl_cpy.send(value, NodeId::new(local_rank.get()+1)).await.unwrap();
+        }
+        Ok(()) as Result<(), LinkError>
+    };
+
+    tokio::try_join!(lpl.listen(), h, send).unwrap();
 }
