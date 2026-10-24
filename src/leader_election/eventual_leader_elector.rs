@@ -94,8 +94,7 @@ impl MonarchicalEventualLeaderElector {
             .nodes
             .iter()
             .filter(|id| !suspected.contains(id))
-            .reduce(|a, b| if a.get() > b.get() { a } else { b })
-            .map(|id| *id);
+            .reduce(|a, b| if a.get() > b.get() { a } else { b }).copied();
 
         match highest_id {
             Some(id) => Ok(id),
