@@ -2,11 +2,10 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     common::NodeId,
-    failure_detector::eventually_perfect_failure_detector::EventuallyPerfectFailureDetector,
+    failure_detector::eventually_perfect_failure_detector::IncreasingTimeout,
+    leader_election::{LeaderElection, eventual_leader_elector::MonarchicalEventualLeaderElector},
     links::{
-        LinkError, LocalhostResolver,
-        fair_loss_link::FairLossLink,
-        logged_perfect_link::{CommitAndAcknowledge, LoggedPerfectLink},
+        LinkError, LocalhostResolver, fair_loss_link::FairLossLink,
         perfect_link::AcknowledgeMessages,
     },
 };
@@ -33,7 +32,7 @@ async fn main() {
 
     let nodes: HashSet<NodeId> = (1..=n_peers).map(NodeId::from).collect();
 
-    let _peers: HashSet<NodeId> = nodes
+    let peers: HashSet<NodeId> = nodes
         .clone()
         .into_iter()
         .filter(|id| *id != local_rank)
@@ -44,28 +43,17 @@ async fn main() {
         .expect("fair_loss_link");
 
     let pl = Arc::from(AcknowledgeMessages::new(fll, None));
-    let lpl = Arc::from(CommitAndAcknowledge::new(local_rank, pl, None));
+    let epfd = Arc::from(IncreasingTimeout::new(peers, pl));
+    let ele = Arc::from(MonarchicalEventualLeaderElector::new(nodes, epfd));
 
-    let mut i = lpl.take_indications().await.take().unwrap();
+    let mut i = ele.take_indications().await.take().unwrap();
     let h = async move {
         while let Some(i) = i.recv().await {
-            println!("Delivered: {:?}", i.delivered);
+            println!("Leader: {:?}", i.node_id);
         }
         let res: Result<(), LinkError> = Ok(());
         res
     };
 
-    let lpl_cpy = Arc::clone(&lpl);
-    let send = async move {
-        let mut counter = 1;
-        while counter < 5 {
-            counter +=1 ;
-            let msg = format!("Message number {counter}");
-            let value = serde_json::to_value(msg).unwrap();
-            lpl_cpy.send(value, NodeId::new(local_rank.get()+1)).await.unwrap();
-        }
-        Ok(()) as Result<(), LinkError>
-    };
-
-    tokio::try_join!(lpl.listen(), h, send).unwrap();
+    tokio::try_join!(ele.start(), h).unwrap();
 }
