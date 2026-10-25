@@ -7,6 +7,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde_json::Value;
 
 use crate::{
+    broadcast::best_effort::{BasicBroadcast, BestEffortBroadcast},
     common::NodeId,
     crypto, factory,
     failure_detector::{
@@ -146,5 +147,17 @@ pub fn byzantine_leader_elector(
         config.nodes_vec(),
         auth_perfect_link(fair_loss_link, config),
         (config.number_of_nodes.saturating_sub(1) / 3) as usize,
+    ))
+}
+
+// Broadcast
+
+pub fn best_effort_broadcast(
+    fair_loss_link: FairLossLink,
+    config: &ClusterConfig,
+) -> Arc<dyn BestEffortBroadcast<Value>> {
+    Arc::from(BasicBroadcast::new(
+        perfect_link(fair_loss_link, config),
+        config.nodes(),
     ))
 }
