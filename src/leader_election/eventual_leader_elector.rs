@@ -1,7 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::{
@@ -11,7 +10,7 @@ use crate::{
             EpfdMessageIndication, EventuallyPerfectFailureDetector,
         },
     },
-    leader_election::{Leader, LeaderElection},
+    leader_election::{Leader},
     links::LinkError::{self, InternalError},
 };
 

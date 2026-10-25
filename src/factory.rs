@@ -33,7 +33,6 @@ use crate::{
 pub struct ClusterConfig {
     pub local_id: NodeId,
     pub number_of_nodes: u16,
-    pub base_port: u16,
 }
 
 impl ClusterConfig {
