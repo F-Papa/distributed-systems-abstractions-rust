@@ -136,7 +136,7 @@ impl IncreasingTimeout {
                     let payload = serde_json::to_value(Heartbeat::new(EpfdMessage::HeartReply))
                         .map_err(|e| MessageError(e.to_string()))?;
 
-                    self.perfect_link.send(payload, deliver.sender).await?;
+                    self.perfect_link.send(&payload, deliver.sender).await?;
                     debug!("{:?} sent to {}", EpfdMessage::HeartReply, deliver.sender);
                 }
             };
@@ -194,7 +194,7 @@ impl IncreasingTimeout {
                         }
                     };
 
-                self.perfect_link.send(payload, *p).await?;
+                self.perfect_link.send(&payload, *p).await?;
                 debug!("{:?} sent to {}", EpfdMessage::HeartbeatRequest, p);
             }
 

@@ -15,8 +15,11 @@ use crate::links::stubborn_link::StubbornLink;
 use crate::links::{LinkError, NodeId};
 
 #[async_trait]
-impl AuthenticatedPerfectLink<Value> for AuthenticateAndFilter {
-    async fn send(&self, payload: Value, recipient: NodeId) -> Result<(), LinkError> {
+impl<T> AuthenticatedPerfectLink<T> for AuthenticateAndFilter
+where
+    T: Sync + Serialize,
+{
+    async fn send<'a>(&'a self, payload: &'a T, recipient: NodeId) -> Result<(), LinkError> {
         let id = uuid::Uuid::new_v4();
         let payload_bytes =
             serde_json::to_vec(&payload).map_err(|e| MessageError(e.to_string()))?;
@@ -32,7 +35,7 @@ impl AuthenticatedPerfectLink<Value> for AuthenticateAndFilter {
         };
 
         let value = serde_json::to_value(envelope).map_err(|e| MessageError(e.to_string()))?;
-        self.stubborn_link.send(value, recipient).await?;
+        self.stubborn_link.send(&value, recipient).await?;
         Ok(())
     }
 

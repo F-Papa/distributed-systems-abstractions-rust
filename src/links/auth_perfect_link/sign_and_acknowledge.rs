@@ -55,9 +55,9 @@ struct Envelope<T, S> {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-enum ProtocolMessage {
+enum ProtocolMessage<T> {
     Ack(Uuid),
-    Data(Value),
+    Data(T),
 }
 
 type OutboxEntry = ((NodeId, Uuid), Arc<Value>);
@@ -88,11 +88,14 @@ impl SignAndAcknowledge {
         }
     }
 
-    fn encode_message(
+    fn encode_message<T>(
         &self,
-        payload: ProtocolMessage,
+        payload: ProtocolMessage<T>,
         recipient: NodeId,
-    ) -> Result<(Uuid, Value), LinkError> {
+    ) -> Result<(Uuid, Value), LinkError>
+    where
+        T: Serialize,
+    {
         let id = Uuid::new_v4();
         let payload_bytes =
             serde_json::to_vec(&payload).map_err(|e| MessageError(e.to_string()))?;
@@ -110,11 +113,14 @@ impl SignAndAcknowledge {
         Ok((id, encoded))
     }
 
-    fn verify_signature(
-        &self,
+    fn verify_signature<'a, T>(
+        &'a self,
         sender: NodeId,
-        envelope: &Envelope<ProtocolMessage, Vec<u8>>,
-    ) -> bool {
+        envelope: &Envelope<ProtocolMessage<T>, Vec<u8>>,
+    ) -> bool
+    where
+        T: Serialize,
+    {
         if envelope.recipient != self.local_id {
             debug!("Wrong recipient: {}", envelope.recipient);
             return false;
@@ -154,7 +160,7 @@ impl SignAndAcknowledge {
     }
 
     async fn ack(&self, to: NodeId, id: Uuid) -> Result<(), LinkError> {
-        let (_, encoded) = self.encode_message(ProtocolMessage::Ack(id), to)?;
+        let (_, encoded) = self.encode_message::<Value>(ProtocolMessage::Ack(id), to)?;
         self.fair_loss_link.send(&encoded, to).await
     }
 
@@ -183,7 +189,7 @@ impl SignAndAcknowledge {
         let mut received_keys = self.inbox.lock().await;
 
         while let Some(fll_deliver) = fll_indications.recv().await {
-            let envelope: Envelope<ProtocolMessage, Vec<u8>> =
+            let envelope: Envelope<ProtocolMessage<Value>, Vec<u8>> =
                 match serde_json::from_value(fll_deliver.message) {
                     Ok(envelope) => envelope,
                     Err(e) => {
@@ -226,8 +232,11 @@ impl SignAndAcknowledge {
 }
 
 #[async_trait]
-impl AuthenticatedPerfectLink<Value> for SignAndAcknowledge {
-    async fn send(&self, payload: Value, recipient: NodeId) -> Result<(), LinkError> {
+impl<T> AuthenticatedPerfectLink<T> for SignAndAcknowledge
+where
+    T: Sync + Serialize,
+{
+    async fn send<'a>(&'a self, payload: &'a T, recipient: NodeId) -> Result<(), LinkError> {
         let (id, encoded_message) =
             self.encode_message(ProtocolMessage::Data(payload), recipient)?;
         let key = (recipient, id);

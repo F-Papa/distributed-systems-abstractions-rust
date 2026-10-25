@@ -82,7 +82,7 @@ impl ByzantineLeaderElection for RotatingElection {
 
         let value = serde_json::to_value(&envelope).map_err(|e| InternalError(e.to_string()))?;
         for p in self.peers.iter() {
-            self.link.send(value.clone(), *p).await?;
+            self.link.send(&value, *p).await?;
         }
 
         Ok(())

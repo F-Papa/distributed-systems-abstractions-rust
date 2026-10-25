@@ -1,11 +1,10 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 
-pub mod eventual_leader_elector;
 pub mod byzantine_leader_election;
+pub mod eventual_leader_elector;
 
 use crate::{
     common::NodeId,
@@ -18,7 +17,7 @@ pub struct Leader {
 }
 
 #[async_trait]
-pub trait LeaderElection<T>: Send + Sync {
+pub trait LeaderElection: Send + Sync {
     async fn start(&self) -> Result<(), LinkError>;
     async fn stop(&self) -> Result<(), LinkError>;
     async fn take_indications(&self) -> Option<mpsc::Receiver<Leader>>;
@@ -32,7 +31,7 @@ pub struct MonarchicalLeaderElection {
 }
 
 #[async_trait]
-impl LeaderElection<Value> for MonarchicalLeaderElection {
+impl LeaderElection for MonarchicalLeaderElection {
     async fn start(&self) -> Result<(), LinkError> {
         tokio::try_join!(self.handle_fd_indications(), self.failure_detector.start())?;
         Ok(())
@@ -98,7 +97,8 @@ impl MonarchicalLeaderElection {
             .nodes
             .iter()
             .filter(|id| !suspected.contains(id))
-            .reduce(|a, b| if a.get() > b.get() { a } else { b }).copied();
+            .reduce(|a, b| if a.get() > b.get() { a } else { b })
+            .copied();
 
         match highest_id {
             Some(id) => Ok(id),

@@ -32,8 +32,11 @@ struct Envelope<T> {
 }
 
 #[async_trait]
-impl PerfectLink<Value> for EliminateDuplicates {
-    async fn send(&self, payload: Value, recipient: NodeId) -> Result<(), LinkError> {
+impl<T> PerfectLink<T> for EliminateDuplicates
+where
+    T: Sync + Serialize,
+{
+    async fn send<'a>(&'a self, payload: &'a T, recipient: NodeId) -> Result<(), LinkError> {
         let envelope = Envelope {
             protocol: Protocol::EliminateDuplicates,
             id: Uuid::new_v4(),
@@ -41,7 +44,7 @@ impl PerfectLink<Value> for EliminateDuplicates {
         };
 
         let bytes = serde_json::to_value(&envelope).map_err(|e| MessageError(e.to_string()))?;
-        self.stubborn_link.send(bytes, recipient).await
+        self.stubborn_link.send(&bytes, recipient).await
     }
 
     async fn listen(&self) -> Result<(), LinkError> {

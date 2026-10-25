@@ -61,7 +61,7 @@ impl<T> Envelope<T> {
 
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(untagged)]
-enum ProtocolMessage {
+enum ProtocolMessage<T> {
     Ack {
         protocol: Protocol,
         #[serde(rename = "Ack")]
@@ -69,7 +69,7 @@ enum ProtocolMessage {
     },
     Data {
         #[serde(rename = "Data")]
-        envelope: Envelope<Value>,
+        envelope: Envelope<T>,
     },
 }
 
@@ -92,7 +92,7 @@ impl AcknowledgeMessages {
         }
     }
     async fn ack(&self, to: NodeId, id: Uuid) -> Result<(), LinkError> {
-        let ack = ProtocolMessage::Ack {
+        let ack: ProtocolMessage<Value> = ProtocolMessage::Ack {
             protocol: Protocol::AcknowledgeMessages,
             id,
         };
@@ -129,7 +129,8 @@ impl AcknowledgeMessages {
         let mut received_keys = self.inbox.lock().await;
 
         while let Some(fll_deliver) = fll_indications.recv().await {
-            let message: ProtocolMessage = match serde_json::from_value(fll_deliver.message) {
+            let message: ProtocolMessage<Value> = match serde_json::from_value(fll_deliver.message)
+            {
                 Ok(e) => e,
                 Err(e) => {
                     debug!("Invalid message from {}: {}", fll_deliver.sender, e);
@@ -163,8 +164,11 @@ impl AcknowledgeMessages {
 }
 
 #[async_trait]
-impl PerfectLink<Value> for AcknowledgeMessages {
-    async fn send(&self, payload: Value, recipient: links::NodeId) -> Result<(), LinkError> {
+impl<T> PerfectLink<T> for AcknowledgeMessages
+where
+    T: Sync + Serialize,
+{
+    async fn send<'a>(&'a self, payload: &'a T, recipient: links::NodeId) -> Result<(), LinkError> {
         let envelope = Envelope {
             protocol: Protocol::AcknowledgeMessages,
             payload,

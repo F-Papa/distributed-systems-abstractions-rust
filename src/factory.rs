@@ -120,7 +120,7 @@ pub fn eventually_perfect_failure_detector(
 pub fn leader_elector(
     fair_loss_link: FairLossLink,
     config: &ClusterConfig,
-) -> Arc<dyn LeaderElection<Value>> {
+) -> Arc<dyn LeaderElection> {
     Arc::from(MonarchicalLeaderElection::new(
         config.nodes(),
         perfect_failure_detector(fair_loss_link, config),

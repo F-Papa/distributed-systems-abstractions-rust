@@ -26,9 +26,9 @@ enum Protocol {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Envelope {
+struct Envelope<T: Serialize> {
     protocol: Protocol,
-    payload: Value,
+    payload: T,
 }
 
 type OutboxEntry = (NodeId, Arc<Value>);
@@ -36,8 +36,11 @@ type OutboxEntry = (NodeId, Arc<Value>);
 pub type SblDeliver = FllDeliver;
 
 #[async_trait]
-pub trait StubbornLink<T>: Send + Sync {
-    async fn send(&self, payload: T, recipient: NodeId) -> Result<(), LinkError>;
+pub trait StubbornLink<T>: Send + Sync
+where
+    T: Sync + Serialize,
+{
+    async fn send<'a>(&'a self, payload: &'a T, recipient: NodeId) -> Result<(), LinkError>;
     async fn listen(&self) -> Result<(), LinkError>;
     async fn close(&self);
     /// Transfers the receiver to its consumer. Returns `None` after the first take.
@@ -54,8 +57,11 @@ pub struct RetransmitForever {
 }
 
 #[async_trait]
-impl StubbornLink<Value> for RetransmitForever {
-    async fn send(&self, payload: Value, recipient: NodeId) -> Result<(), LinkError> {
+impl<T> StubbornLink<T> for RetransmitForever
+where
+    T: Sync + Serialize,
+{
+    async fn send<'a>(&'a self, payload: &'a T, recipient: NodeId) -> Result<(), LinkError> {
         let payload = serde_json::to_value(Envelope {
             protocol: Protocol::RetransmitForever,
             payload,
@@ -144,7 +150,7 @@ impl RetransmitForever {
         while let (Some(fll_indication), Some(tx)) =
             (fll_indications.recv().await, indications_tx.as_ref())
         {
-            let envelope: Envelope = match serde_json::from_value(fll_indication.message) {
+            let envelope: Envelope<Value> = match serde_json::from_value(fll_indication.message) {
                 Ok(envelope) => envelope,
                 Err(_) => continue,
             };

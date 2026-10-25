@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use serde::Serialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -15,8 +16,11 @@ mod sign_and_acknowledge;
 pub use sign_and_acknowledge::SignAndAcknowledge;
 
 #[async_trait]
-pub trait AuthenticatedPerfectLink<T>: Send + Sync {
-    async fn send(&self, payload: T, recipient: NodeId) -> Result<(), LinkError>;
+pub trait AuthenticatedPerfectLink<T>: Send + Sync
+where
+    T: Sync + Serialize,
+{
+    async fn send<'a>(&'a self, payload: &'a T, recipient: NodeId) -> Result<(), LinkError>;
     async fn listen(&self) -> Result<(), LinkError>;
     async fn close(&self);
     /// Transfers the receiver to its consumer. Returns `None` after the first take.

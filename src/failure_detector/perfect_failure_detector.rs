@@ -131,7 +131,7 @@ impl ExcludeOnTimeout {
                     let payload = serde_json::to_value(Heartbeat::new(PfdMessage::HeartReply))
                         .map_err(|e| MessageError(e.to_string()))?;
 
-                    self.perfect_link.send(payload, deliver.sender).await?;
+                    self.perfect_link.send(&payload, deliver.sender).await?;
                     debug!("{:?} sent to {}", HeartReply, deliver.sender);
                 }
             };
@@ -177,7 +177,7 @@ impl ExcludeOnTimeout {
                     }
                 };
 
-                self.perfect_link.send(payload, *p).await?;
+                self.perfect_link.send(&payload, *p).await?;
                 debug!("{:?} sent to {}", HeartbeatRequest, p);
             }
 

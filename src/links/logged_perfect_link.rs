@@ -41,8 +41,11 @@ struct Envelope<T> {
 }
 
 #[async_trait]
-pub trait LoggedPerfectLink<T> {
-    async fn send(&self, payload: T, recipient: NodeId) -> Result<(), LinkError>;
+pub trait LoggedPerfectLink<T>: Send + Sync
+where
+    T: Sync + Serialize,
+{
+    async fn send<'a>(&'a self, payload: &'a T, recipient: NodeId) -> Result<(), LinkError>;
     async fn listen(&self) -> Result<(), LinkError>;
     async fn close(&self);
     /// Transfers the receiver to its consumer. Returns `None` after the first take.
@@ -160,8 +163,11 @@ impl CommitAndAcknowledge {
 }
 
 #[async_trait]
-impl LoggedPerfectLink<Value> for CommitAndAcknowledge {
-    async fn send(&self, payload: Value, recipient: NodeId) -> Result<(), LinkError> {
+impl<T> LoggedPerfectLink<T> for CommitAndAcknowledge
+where
+    T: Sync + Serialize,
+{
+    async fn send<'a>(&'a self, payload: &'a T, recipient: NodeId) -> Result<(), LinkError> {
         let envelope = Envelope {
             id: Uuid::new_v4(),
             payload,
@@ -172,7 +178,7 @@ impl LoggedPerfectLink<Value> for CommitAndAcknowledge {
             envelope,
         })
         .map_err(|e| InternalError(e.to_string()))?;
-        self.perfect_link.send(value, recipient).await
+        self.perfect_link.send(&value, recipient).await
     }
     async fn listen(&self) -> Result<(), LinkError> {
         let delivered = self.retrieve().await?;

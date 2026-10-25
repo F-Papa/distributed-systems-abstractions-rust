@@ -1,18 +1,14 @@
-use std::{sync::Arc};
-
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::common::NodeId;
 
 pub mod auth_perfect_link;
 pub mod fair_loss_link;
+pub mod logged_perfect_link;
 pub mod perfect_link;
 pub mod stubborn_link;
-pub mod logged_perfect_link;
 
 const MAX_LENGTH: usize = 1000;
-
-pub type Callback = Arc<dyn Fn(&[u8]) -> Result<(), LinkError> + Send + Sync>;
 
 #[derive(Debug)]
 pub enum LinkError {
