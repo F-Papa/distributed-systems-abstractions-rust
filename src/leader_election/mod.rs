@@ -5,6 +5,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 
 pub mod eventual_leader_elector;
+pub mod byzantine_leader_election;
 
 use crate::{
     common::NodeId,
