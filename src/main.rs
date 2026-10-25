@@ -1,17 +1,14 @@
-use std::{collections::HashSet, sync::Arc};
+use std::time::Duration;
 
 use crate::{
     common::NodeId,
-    failure_detector::eventually_perfect_failure_detector::IncreasingTimeout,
-    leader_election::{LeaderElection, eventual_leader_elector::MonarchicalEventualLeaderElector},
-    links::{
-        LinkError, LocalhostResolver, fair_loss_link::FairLossLink,
-        perfect_link::AcknowledgeMessages,
-    },
+    factory::ClusterConfig,
+    links::{LinkError, LocalhostResolver, fair_loss_link::FairLossLink},
 };
 
 pub mod common;
 pub mod crypto;
+mod factory;
 pub mod failure_detector;
 pub mod leader_election;
 pub mod links;
@@ -27,26 +24,20 @@ async fn main() {
     );
 
     let base_port = args[1].parse::<u16>().expect("Invalid base port");
-    let local_rank = NodeId::new(args[2].parse::<u16>().expect("Invalid local rank"));
-    let n_peers = args[3].parse::<u16>().expect("Invalid number of peers");
+    let local_id = NodeId::new(args[2].parse::<u16>().expect("Invalid local rank"));
+    let number_of_nodes = args[3].parse::<u16>().expect("Invalid number of peers");
+    let cluster_config = ClusterConfig {
+        number_of_nodes,
+        local_id,
+    };
 
-    let nodes: HashSet<NodeId> = (1..=n_peers).map(NodeId::from).collect();
-
-    let peers: HashSet<NodeId> = nodes
-        .clone()
-        .into_iter()
-        .filter(|id| *id != local_rank)
-        .collect();
-
-    let fll = FairLossLink::new(local_rank, Box::from(LocalhostResolver { base_port }))
+    let fll = FairLossLink::new(local_id, Box::from(LocalhostResolver { base_port }))
         .await
-        .expect("fair_loss_link");
+        .unwrap();
 
-    let pl = Arc::from(AcknowledgeMessages::new(fll, None));
-    let epfd = Arc::from(IncreasingTimeout::new(peers, pl));
-    let ele = Arc::from(MonarchicalEventualLeaderElector::new(nodes, epfd));
+    let ble = factory::byzantine_leader_elector(fll, &cluster_config);
+    let mut i = ble.take_indications().await.unwrap();
 
-    let mut i = ele.take_indications().await.take().unwrap();
     let h = async move {
         while let Some(i) = i.recv().await {
             println!("Leader: {:?}", i.node_id);
@@ -55,5 +46,17 @@ async fn main() {
         res
     };
 
-    tokio::try_join!(ele.start(), h).unwrap();
+    let ble_cpy = ble.clone();
+    let c = async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(rand::random_range(1..=10))).await;
+            println!("Complaining");
+            ble_cpy.complain().await?;
+        }
+
+        let res: Result<(), LinkError> = Ok(());
+        res
+    };
+
+    tokio::try_join!(ble.start(), c, h).unwrap();
 }
