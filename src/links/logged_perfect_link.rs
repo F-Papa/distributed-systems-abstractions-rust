@@ -22,6 +22,18 @@ pub struct LplDeliver {
     pub delivered: Vec<PlDeliver>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+enum Protocol {
+    CommitAndAcknowledge,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WireEnvelope<T> {
+    protocol: Protocol,
+    #[serde(flatten)]
+    envelope: Envelope<T>,
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 struct Envelope<T> {
     id: Uuid,
@@ -96,11 +108,16 @@ impl CommitAndAcknowledge {
             .await
             .map_err(|e| InternalError(e.to_string()))?;
 
-        rename(tmp_filepath, &self.log_filepath).await.map_err(|e| InternalError(e.to_string()))?;
+        rename(tmp_filepath, &self.log_filepath)
+            .await
+            .map_err(|e| InternalError(e.to_string()))?;
         Ok(())
     }
 
-    async fn handle_pl_indications(&self, mut delivered: Vec<Envelope<Value>>) -> Result<(), LinkError> {
+    async fn handle_pl_indications(
+        &self,
+        mut delivered: Vec<Envelope<Value>>,
+    ) -> Result<(), LinkError> {
         let tx = match self.indications_tx.lock().await.take() {
             Some(tx) => tx,
             None => return Err(LinkError::LinkClosed()),
@@ -108,14 +125,16 @@ impl CommitAndAcknowledge {
 
         if let Some(mut pl_indications) = self.perfect_link.take_indications().await.take() {
             while let Some(pl_delivery) = pl_indications.recv().await {
-                let envelope: Envelope<Value> = match serde_json::from_value(pl_delivery.message) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        debug!("could not deserialize envelope: {}", e);
-                        continue;
-                    }
-                };
+                let envelope: WireEnvelope<Value> =
+                    match serde_json::from_value(pl_delivery.message) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            debug!("could not deserialize envelope: {}", e);
+                            continue;
+                        }
+                    };
 
+                let envelope = envelope.envelope;
                 let is_dup = delivered.iter().find(|d| d.id == envelope.id).is_some();
                 if is_dup {
                     continue;
@@ -148,12 +167,19 @@ impl LoggedPerfectLink<Value> for CommitAndAcknowledge {
             payload,
         };
 
-        let value = serde_json::to_value(envelope).map_err(|e| InternalError(e.to_string()))?;
+        let value = serde_json::to_value(WireEnvelope {
+            protocol: Protocol::CommitAndAcknowledge,
+            envelope,
+        })
+        .map_err(|e| InternalError(e.to_string()))?;
         self.perfect_link.send(value, recipient).await
     }
     async fn listen(&self) -> Result<(), LinkError> {
         let delivered = self.retrieve().await?;
-        tokio::try_join!(self.handle_pl_indications(delivered), self.perfect_link.listen())?;
+        tokio::try_join!(
+            self.handle_pl_indications(delivered),
+            self.perfect_link.listen()
+        )?;
         Ok(())
     }
     async fn close(&self) {

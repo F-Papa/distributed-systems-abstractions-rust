@@ -23,10 +23,19 @@ pub trait AuthenticatedPerfectLink<T>: Send + Sync {
     async fn take_indications(&self) -> Option<mpsc::Receiver<AplDeliver>>;
 }
 
-pub(crate) fn bytes_to_sign(id: &Uuid, recipient: NodeId, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn bytes_to_sign(
+    protocol: &str,
+    id: &Uuid,
+    recipient: NodeId,
+    payload: &[u8],
+) -> Vec<u8> {
     let id_bytes = id.as_bytes();
-    let mut buf = Vec::with_capacity(id_bytes.len() + payload.len() + NodeId::ENCODED_LEN);
+    let mut buf = Vec::with_capacity(
+        protocol.len() + 1 + id_bytes.len() + payload.len() + NodeId::ENCODED_LEN,
+    );
 
+    buf.extend_from_slice(protocol.as_bytes());
+    buf.push(0);
     buf.extend_from_slice(&recipient.to_be_bytes()[..]);
     buf.extend_from_slice(id_bytes);
     buf.extend_from_slice(payload);

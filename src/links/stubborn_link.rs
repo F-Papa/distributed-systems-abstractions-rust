@@ -2,6 +2,7 @@ use async_trait::async_trait;
 
 use std::{sync::Arc, time::Duration};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
     select,
@@ -18,6 +19,17 @@ use crate::{
         fair_loss_link::{FairLossLink, FllDeliver},
     },
 };
+
+#[derive(Debug, Serialize, Deserialize)]
+enum Protocol {
+    RetransmitForever,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Envelope {
+    protocol: Protocol,
+    payload: Value,
+}
 
 type OutboxEntry = (NodeId, Arc<Value>);
 
@@ -44,6 +56,11 @@ pub struct RetransmitForever {
 #[async_trait]
 impl StubbornLink<Value> for RetransmitForever {
     async fn send(&self, payload: Value, recipient: NodeId) -> Result<(), LinkError> {
+        let payload = serde_json::to_value(Envelope {
+            protocol: Protocol::RetransmitForever,
+            payload,
+        })
+        .map_err(|e| LinkError::MessageError(e.to_string()))?;
         self.fair_loss_link.send(&payload, recipient).await?;
         self.outbox
             .lock()
@@ -127,9 +144,16 @@ impl RetransmitForever {
         while let (Some(fll_indication), Some(tx)) =
             (fll_indications.recv().await, indications_tx.as_ref())
         {
-            tx.send(fll_indication)
-                .await
-                .map_err(|e| InternalError(e.to_string()))?;
+            let envelope: Envelope = match serde_json::from_value(fll_indication.message) {
+                Ok(envelope) => envelope,
+                Err(_) => continue,
+            };
+            tx.send(SblDeliver {
+                message: envelope.payload,
+                sender: fll_indication.sender,
+            })
+            .await
+            .map_err(|e| InternalError(e.to_string()))?;
         }
         Ok(())
     }

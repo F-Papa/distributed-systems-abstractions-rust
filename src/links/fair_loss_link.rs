@@ -80,7 +80,13 @@ pub struct FairLossLink {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+enum Protocol {
+    FairLossLink,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct Envelope<T> {
+    protocol: Protocol,
     sender: NodeId,
     recipient: NodeId,
     payload: T,
@@ -115,6 +121,7 @@ impl FairLossLink {
         let addr = self.resolver.resolve(recipient);
 
         let envelope = Envelope {
+            protocol: Protocol::FairLossLink,
             sender: self.local_id,
             recipient,
             payload: msg,

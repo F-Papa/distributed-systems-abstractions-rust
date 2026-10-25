@@ -40,8 +40,14 @@ pub struct AcknowledgeMessages {
     shutdown_handler: ShutdownHandler,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+enum Protocol {
+    AcknowledgeMessages,
+}
+
 #[derive(Serialize, Debug, Deserialize)]
 struct Envelope<T> {
+    protocol: Protocol,
     id: Uuid,
     recipient: NodeId,
     payload: T,
@@ -54,9 +60,17 @@ impl<T> Envelope<T> {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
+#[serde(untagged)]
 enum ProtocolMessage {
-    Ack(Uuid),
-    Data(Value),
+    Ack {
+        protocol: Protocol,
+        #[serde(rename = "Ack")]
+        id: Uuid,
+    },
+    Data {
+        #[serde(rename = "Data")]
+        envelope: Envelope<Value>,
+    },
 }
 
 type OutboxEntry = ((NodeId, Uuid), Arc<Value>);
@@ -78,7 +92,10 @@ impl AcknowledgeMessages {
         }
     }
     async fn ack(&self, to: NodeId, id: Uuid) -> Result<(), LinkError> {
-        let ack = ProtocolMessage::Ack(id);
+        let ack = ProtocolMessage::Ack {
+            protocol: Protocol::AcknowledgeMessages,
+            id,
+        };
         let encoded = serde_json::to_value(&ack).map_err(|e| MessageError(e.to_string()))?;
         self.fair_loss_link.send(&encoded, to).await
     }
@@ -120,20 +137,12 @@ impl AcknowledgeMessages {
                 }
             };
 
-            let value = match message {
-                ProtocolMessage::Ack(id) => {
+            let envelope = match message {
+                ProtocolMessage::Ack { id, .. } => {
                     self.outbox.lock().await.remove(&(fll_deliver.sender, id));
                     continue;
                 }
-                ProtocolMessage::Data(value) => value,
-            };
-
-            let envelope: Envelope<Value> = match serde_json::from_value(value) {
-                Ok(e) => e,
-                Err(e) => {
-                    debug!("could not deserialize envelope: {}", e);
-                    continue;
-                }
+                ProtocolMessage::Data { envelope } => envelope,
             };
 
             let dedup_key = envelope.key();
@@ -157,18 +166,16 @@ impl AcknowledgeMessages {
 impl PerfectLink<Value> for AcknowledgeMessages {
     async fn send(&self, payload: Value, recipient: links::NodeId) -> Result<(), LinkError> {
         let envelope = Envelope {
+            protocol: Protocol::AcknowledgeMessages,
             payload,
             recipient,
             id: Uuid::new_v4(),
         };
 
-        let encoded_envelope =
-            serde_json::to_value(&envelope).map_err(|e| MessageError(e.to_string()))?;
-
-        let encoded_message = serde_json::to_value(ProtocolMessage::Data(encoded_envelope))
+        let key = (recipient, envelope.id);
+        let encoded_message = serde_json::to_value(ProtocolMessage::Data { envelope })
             .map_err(|e| MessageError(e.to_string()))?;
 
-        let key = (recipient, envelope.id);
         let encoded_message = Arc::from(encoded_message);
 
         self.outbox

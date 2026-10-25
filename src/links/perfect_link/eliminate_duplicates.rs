@@ -20,7 +20,13 @@ pub struct EliminateDuplicates {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+enum Protocol {
+    EliminateDuplicates,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct Envelope<T> {
+    protocol: Protocol,
     id: Uuid,
     payload: T,
 }
@@ -29,6 +35,7 @@ struct Envelope<T> {
 impl PerfectLink<Value> for EliminateDuplicates {
     async fn send(&self, payload: Value, recipient: NodeId) -> Result<(), LinkError> {
         let envelope = Envelope {
+            protocol: Protocol::EliminateDuplicates,
             id: Uuid::new_v4(),
             payload,
         };

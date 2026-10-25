@@ -44,7 +44,29 @@ pub struct IncreasingTimeout {
     shutdown_handler: ShutdownHandler,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+enum Protocol {
+    IncreasingTimeout,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Heartbeat {
+    protocol: Protocol,
+    #[serde(flatten)]
+    message: EpfdMessage,
+}
+
+impl Heartbeat {
+    fn new(message: EpfdMessage) -> Self {
+        Self {
+            protocol: Protocol::IncreasingTimeout,
+            message,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type")]
 enum EpfdMessage {
     HeartbeatRequest,
     HeartReply,
@@ -96,7 +118,9 @@ impl IncreasingTimeout {
             })?;
 
         while let Some(deliver) = indications.recv().await {
-            match serde_json::from_value(deliver.message) {
+            match serde_json::from_value::<Heartbeat>(deliver.message)
+                .map(|heartbeat| heartbeat.message)
+            {
                 Err(_) => continue,
                 Ok(EpfdMessage::HeartReply) => {
                     debug!("{:?} from {}", EpfdMessage::HeartReply, deliver.sender);
@@ -109,7 +133,7 @@ impl IncreasingTimeout {
                         deliver.sender
                     );
 
-                    let payload = serde_json::to_value(EpfdMessage::HeartReply)
+                    let payload = serde_json::to_value(Heartbeat::new(EpfdMessage::HeartReply))
                         .map_err(|e| MessageError(e.to_string()))?;
 
                     self.perfect_link.send(payload, deliver.sender).await?;
@@ -161,13 +185,14 @@ impl IncreasingTimeout {
                     }
                 }
 
-                let payload = match serde_json::to_value(EpfdMessage::HeartbeatRequest) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        debug!("Error encoding HeartbeatRequest: {:?}", e);
-                        continue;
-                    }
-                };
+                let payload =
+                    match serde_json::to_value(Heartbeat::new(EpfdMessage::HeartbeatRequest)) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            debug!("Error encoding HeartbeatRequest: {:?}", e);
+                            continue;
+                        }
+                    };
 
                 self.perfect_link.send(payload, *p).await?;
                 debug!("{:?} sent to {}", EpfdMessage::HeartbeatRequest, p);

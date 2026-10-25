@@ -40,8 +40,14 @@ pub struct SignAndAcknowledge {
     verifiers: HashMap<NodeId, Arc<VerifyingKey>>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+enum Protocol {
+    SignAndAcknowledge,
+}
+
 #[derive(Serialize, Debug, Deserialize)]
 struct Envelope<T, S> {
+    protocol: Protocol,
     id: Uuid,
     recipient: NodeId,
     payload: T,
@@ -90,10 +96,11 @@ impl SignAndAcknowledge {
         let id = Uuid::new_v4();
         let payload_bytes =
             serde_json::to_vec(&payload).map_err(|e| MessageError(e.to_string()))?;
-        let to_sign = bytes_to_sign(&id, recipient, &payload_bytes);
+        let to_sign = bytes_to_sign("SignAndAcknowledge", &id, recipient, &payload_bytes);
         let signature = self.signing_key.sign(&to_sign).to_bytes();
 
         let envelope = Envelope {
+            protocol: Protocol::SignAndAcknowledge,
             id,
             recipient,
             payload,
@@ -129,7 +136,12 @@ impl SignAndAcknowledge {
             }
         };
 
-        let bytes_to_verify = bytes_to_sign(&envelope.id, self.local_id, &payload_bytes);
+        let bytes_to_verify = bytes_to_sign(
+            "SignAndAcknowledge",
+            &envelope.id,
+            self.local_id,
+            &payload_bytes,
+        );
         let signature = match Signature::from_slice(&envelope.signature) {
             Ok(signature) => signature,
             Err(e) => {

@@ -45,7 +45,29 @@ pub struct ExcludeOnTimeout {
     shutdown_handler: ShutdownHandler,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+enum Protocol {
+    ExcludeOnTimeout,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Heartbeat {
+    protocol: Protocol,
+    #[serde(flatten)]
+    message: PfdMessage,
+}
+
+impl Heartbeat {
+    fn new(message: PfdMessage) -> Self {
+        Self {
+            protocol: Protocol::ExcludeOnTimeout,
+            message,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type")]
 enum PfdMessage {
     HeartbeatRequest,
     HeartReply,
@@ -95,7 +117,9 @@ impl ExcludeOnTimeout {
             })?;
 
         while let Some(deliver) = indications.recv().await {
-            match serde_json::from_value(deliver.message) {
+            match serde_json::from_value::<Heartbeat>(deliver.message)
+                .map(|heartbeat| heartbeat.message)
+            {
                 Err(_) => continue,
                 Ok(HeartReply) => {
                     debug!("{:?} from {}", HeartReply, deliver.sender);
@@ -104,7 +128,7 @@ impl ExcludeOnTimeout {
                 Ok(HeartbeatRequest) => {
                     debug!("{:?} from {}", HeartbeatRequest, deliver.sender);
 
-                    let payload = serde_json::to_value(PfdMessage::HeartReply)
+                    let payload = serde_json::to_value(Heartbeat::new(PfdMessage::HeartReply))
                         .map_err(|e| MessageError(e.to_string()))?;
 
                     self.perfect_link.send(payload, deliver.sender).await?;
@@ -145,7 +169,7 @@ impl ExcludeOnTimeout {
                     };
                 }
 
-                let payload = match serde_json::to_value(HeartbeatRequest) {
+                let payload = match serde_json::to_value(Heartbeat::new(HeartbeatRequest)) {
                     Ok(p) => p,
                     Err(e) => {
                         debug!("Error encoding HeartbeatRequest: {:?}", e);

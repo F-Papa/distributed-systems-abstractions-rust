@@ -21,10 +21,11 @@ impl AuthenticatedPerfectLink<Value> for AuthenticateAndFilter {
         let payload_bytes =
             serde_json::to_vec(&payload).map_err(|e| MessageError(e.to_string()))?;
 
-        let to_sign = bytes_to_sign(&id, recipient, &payload_bytes);
+        let to_sign = bytes_to_sign("AuthenticateAndFilter", &id, recipient, &payload_bytes);
         let signature = self.signing_key.sign(&to_sign).to_bytes();
 
         let envelope = Envelope {
+            protocol: Protocol::AuthenticateAndFilter,
             id,
             signature: &signature[..],
             payload,
@@ -60,7 +61,13 @@ pub struct AuthenticateAndFilter {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+enum Protocol {
+    AuthenticateAndFilter,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct Envelope<T, S> {
+    protocol: Protocol,
     id: Uuid,
     payload: T,
     signature: S,
@@ -160,7 +167,12 @@ impl AuthenticateAndFilter {
             }
         };
 
-        let bytes_to_verify = bytes_to_sign(&envelope.id, self.local_id, &payload_bytes);
+        let bytes_to_verify = bytes_to_sign(
+            "AuthenticateAndFilter",
+            &envelope.id,
+            self.local_id,
+            &payload_bytes,
+        );
         let signature = match Signature::from_slice(&envelope.signature) {
             Ok(s) => s,
             Err(e) => {
