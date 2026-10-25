@@ -104,7 +104,7 @@ impl MonarchicalEventualLeaderElector {
 }
 
 #[async_trait]
-impl LeaderElection<Value> for MonarchicalEventualLeaderElector {
+impl EventualLeaderElection for MonarchicalEventualLeaderElector {
     async fn start(&self) -> Result<(), LinkError> {
         tokio::try_join!(
             self.failure_detector.start(),
