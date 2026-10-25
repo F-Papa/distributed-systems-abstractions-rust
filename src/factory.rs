@@ -37,22 +37,26 @@ pub struct ClusterConfig {
 }
 
 impl ClusterConfig {
-    pub fn nodes(&self) -> HashSet<NodeId> {
+    pub(crate) fn nodes(&self) -> HashSet<NodeId> {
         (1..=self.number_of_nodes).map(NodeId::new).collect()
     }
 
-    pub fn peers(&self) -> HashSet<NodeId> {
+    pub(crate) fn nodes_vec(&self) -> Vec<NodeId> {
+        (1..=self.number_of_nodes).map(NodeId::new).collect()
+    }
+
+    pub(crate) fn peers(&self) -> HashSet<NodeId> {
         self.nodes()
             .into_iter()
             .filter(|id| *id != self.local_id)
             .collect()
     }
 
-    pub fn signing_key(&self) -> SigningKey {
+    pub(crate) fn signing_key(&self) -> SigningKey {
         crypto::get_signing_key(self.local_id).unwrap()
     }
 
-    pub fn verifiers(&self) -> HashMap<NodeId, Arc<VerifyingKey>> {
+    pub(crate) fn verifiers(&self) -> HashMap<NodeId, Arc<VerifyingKey>> {
         HashMap::from_iter(
             self.nodes()
                 .into_iter()
@@ -63,21 +67,21 @@ impl ClusterConfig {
 
 // Links
 
-fn stubborn_link(
+pub fn stubborn_link(
     fair_loss_link: FairLossLink,
     _config: &ClusterConfig,
 ) -> Arc<dyn StubbornLink<Value>> {
     Arc::from(RetransmitForever::new(None, fair_loss_link))
 }
 
-fn perfect_link(
+pub fn perfect_link(
     fair_loss_link: FairLossLink,
     _config: &ClusterConfig,
 ) -> Arc<dyn PerfectLink<Value>> {
     Arc::from(AcknowledgeMessages::new(fair_loss_link, None))
 }
 
-fn auth_perfect_link(
+pub fn auth_perfect_link(
     fair_loss_link: FairLossLink,
     config: &ClusterConfig,
 ) -> Arc<dyn AuthenticatedPerfectLink<Value>> {
@@ -92,7 +96,7 @@ fn auth_perfect_link(
 
 // Failure Detectors
 
-fn perfect_failure_detector(
+pub fn perfect_failure_detector(
     fair_loss_link: FairLossLink,
     config: &ClusterConfig,
 ) -> Arc<dyn PerfectFailureDetector> {
@@ -102,7 +106,7 @@ fn perfect_failure_detector(
     ))
 }
 
-fn eventually_perfect_failure_detector(
+pub fn eventually_perfect_failure_detector(
     fair_loss_link: FairLossLink,
     config: &ClusterConfig,
 ) -> Arc<dyn EventuallyPerfectFailureDetector> {
@@ -114,7 +118,7 @@ fn eventually_perfect_failure_detector(
 
 // Leader Electors
 
-fn leader_elector(
+pub fn leader_elector(
     fair_loss_link: FairLossLink,
     config: &ClusterConfig,
 ) -> Arc<dyn LeaderElection<Value>> {
@@ -124,7 +128,7 @@ fn leader_elector(
     ))
 }
 
-fn eventual_leader_elector(
+pub fn eventual_leader_elector(
     fair_loss_link: FairLossLink,
     config: &ClusterConfig,
 ) -> Arc<dyn EventualLeaderElection> {
@@ -134,13 +138,13 @@ fn eventual_leader_elector(
     ))
 }
 
-fn byzantine_leader_elector(
+pub fn byzantine_leader_elector(
     fair_loss_link: FairLossLink,
     config: &ClusterConfig,
 ) -> Arc<dyn ByzantineLeaderElection> {
     Arc::from(RotatingElection::new(
         config.peers(),
-        config.nodes().into_iter().collect(),
+        config.nodes_vec(),
         auth_perfect_link(fair_loss_link, config),
         (config.number_of_nodes.saturating_sub(1) / 3) as usize,
     ))
