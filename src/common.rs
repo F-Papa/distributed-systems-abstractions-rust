@@ -89,6 +89,9 @@ impl Default for InputHandler {
     }
 }
 
+// type Callback<I, O> = AsyncFnOnce(I) -> O;
+// type Callback<I, O> = Box<dyn Fn(I) -> Pin<Box<dyn Future<Output = O>>>>;
+
 impl InputHandler {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(32);
@@ -111,6 +114,17 @@ impl InputHandler {
                 tx.blocking_send(input).unwrap();
             }
         });
+    }
+
+    pub async fn handle_input<C, E>(&self, callback: C) -> Result<(), E>
+    where
+        C: AsyncFn(String) -> Result<(), E>,
+    {
+        let mut rx = self.take_rx().unwrap();
+        while let Some(input) = rx.recv().await {
+            callback(input).await?;
+        }
+        Ok::<(), E>(())
     }
 
     pub fn take_rx(&self) -> Option<mpsc::Receiver<String>> {

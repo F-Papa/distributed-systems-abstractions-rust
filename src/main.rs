@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-
 use crate::{
     common::{InputHandler, NodeId},
     factory::ClusterConfig,
@@ -41,7 +40,7 @@ async fn main() {
     let rb_cpy = rb.clone();
 
     let mut i = rb.take_indications().await.unwrap();
-    let handler = async move {
+    let print_messages = async move {
         while let Some(i) = i.recv().await {
             println!("[{}]: {:?}", i.sender, i.message);
         }
@@ -49,21 +48,20 @@ async fn main() {
         res
     };
 
+    let broadcast_input = async |input: String| {
+        rb_cpy
+            .broadcast(&serde_json::to_value(input).unwrap())
+            .await?;
+        Ok::<(), LinkError>(())
+    };
 
     let input_handler = Arc::from(InputHandler::new());
     input_handler.clone().start();
 
-    let broadcast = async move {
-        let mut rx = input_handler.take_rx().unwrap();
-        while let Some(input) = rx.recv().await {
-            rb_cpy
-                .broadcast(&serde_json::to_value(input).unwrap())
-                .await
-                .unwrap();
-        }
-        let res: Result<(), LinkError> = Ok(());
-        res
-    };
-
-    tokio::try_join!(rb.listen(), handler, broadcast).unwrap();
+    tokio::try_join!(
+        rb.listen(),
+        print_messages,
+        input_handler.handle_input(broadcast_input)
+    )
+    .unwrap();
 }
