@@ -1,7 +1,11 @@
 use core::fmt;
+use std::{io::stdin, sync::Arc, thread};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, watch};
+use tokio::{
+    io,
+    sync::{Mutex, mpsc, watch},
+};
 
 pub struct ShutdownHandler {
     sender: watch::Sender<bool>,
@@ -74,5 +78,39 @@ impl From<NodeId> for u16 {
 impl fmt::Display for NodeId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
+    }
+}
+
+pub struct InputHandler {
+    tx: std::sync::Mutex<Option<mpsc::Sender<String>>>,
+    rx: std::sync::Mutex<Option<mpsc::Receiver<String>>>,
+}
+
+impl InputHandler {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel(32);
+        Self {
+            tx: std::sync::Mutex::from(Some(tx)),
+            rx: std::sync::Mutex::from(Some(rx)),
+        }
+    }
+
+    pub fn start(self: Arc<Self>) {
+        thread::spawn(move || {
+            let tx = match self.tx.lock().unwrap().take() {
+                Some(tx) => tx,
+                None => return,
+            };
+
+            loop {
+                let mut input = String::new();
+                stdin().read_line(&mut input).unwrap();
+                tx.blocking_send(input).unwrap();
+            }
+        });
+    }
+
+    pub fn take_rx(&self) -> Option<mpsc::Receiver<String>> {
+        self.rx.lock().unwrap().take()
     }
 }
