@@ -2,10 +2,7 @@ use core::fmt;
 use std::{io::stdin, sync::Arc, thread};
 
 use serde::{Deserialize, Serialize};
-use tokio::{
-    io,
-    sync::{Mutex, mpsc, watch},
-};
+use tokio::sync::{Mutex, mpsc, watch};
 
 pub struct ShutdownHandler {
     sender: watch::Sender<bool>,
@@ -84,6 +81,12 @@ impl fmt::Display for NodeId {
 pub struct InputHandler {
     tx: std::sync::Mutex<Option<mpsc::Sender<String>>>,
     rx: std::sync::Mutex<Option<mpsc::Receiver<String>>>,
+}
+
+impl Default for InputHandler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InputHandler {

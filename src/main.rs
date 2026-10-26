@@ -1,6 +1,5 @@
-use std::{os::unix::thread, sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use env_logger::fmt::style::AnsiColor::BrightBlue;
 
 use crate::{
     common::{InputHandler, NodeId},

@@ -113,8 +113,8 @@ impl SignAndAcknowledge {
         Ok((id, encoded))
     }
 
-    fn verify_signature<'a, T>(
-        &'a self,
+    fn verify_signature<T>(
+        &self,
         sender: NodeId,
         envelope: &Envelope<ProtocolMessage<T>, Vec<u8>>,
     ) -> bool

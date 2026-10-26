@@ -2,7 +2,6 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use serde::Serialize;
-use serde_json::Value;
 use tokio::{
     sync::{Mutex, mpsc},
     try_join,
@@ -12,7 +11,6 @@ use crate::{
     common::NodeId,
     links::{
         LinkError::{self, InternalError},
-        fair_loss_link,
         perfect_link::{PerfectLink, PlDeliver},
     },
 };
