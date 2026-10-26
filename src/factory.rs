@@ -7,7 +7,10 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde_json::Value;
 
 use crate::{
-    broadcast::best_effort::{BasicBroadcast, BestEffortBroadcast},
+    broadcast::{
+        best_effort::{BasicBroadcast, BestEffortBroadcast},
+        reliable::{EagerReliableBroadcast, ReliableBroadcast},
+    },
     common::NodeId,
     crypto, factory,
     failure_detector::{
@@ -159,5 +162,15 @@ pub fn best_effort_broadcast(
     Arc::from(BasicBroadcast::new(
         perfect_link(fair_loss_link, config),
         config.nodes(),
+    ))
+}
+
+pub fn reliable_broadcast(
+    fair_loss_link: FairLossLink,
+    config: &ClusterConfig,
+) -> Arc<dyn ReliableBroadcast<Value>> {
+    Arc::from(EagerReliableBroadcast::new(
+        config.local_id,
+        best_effort_broadcast(fair_loss_link, config),
     ))
 }
