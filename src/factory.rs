@@ -10,6 +10,7 @@ use crate::{
     broadcast::{
         best_effort::{BasicBroadcast, BestEffortBroadcast},
         reliable::{EagerReliableBroadcast, ReliableBroadcast},
+        stubborn::{BasicStubbonBroadcast, StubbornBroadcast},
         uniform::{MajorityAckBroadcast, UniformBroadcast},
     },
     common::NodeId,
@@ -184,5 +185,16 @@ pub fn uniform_broadcast(
         config.local_id,
         config.number_of_nodes,
         best_effort_broadcast(fair_loss_link, config),
+    ))
+}
+
+pub fn stubborn_broadcast(
+    fair_loss_link: FairLossLink,
+    config: &ClusterConfig,
+) -> Arc<dyn StubbornBroadcast<Value>> {
+    Arc::from(BasicStubbonBroadcast::new(
+        config.local_id,
+        config.peers(),
+        stubborn_link(fair_loss_link, config),
     ))
 }

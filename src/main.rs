@@ -36,10 +36,10 @@ async fn main() {
         .await
         .unwrap();
 
-    let ub = factory::uniform_broadcast(fll, &cluster_config);
-    let ub_cpy = ub.clone();
+    let sb = factory::stubborn_broadcast(fll, &cluster_config);
+    let sb_cpy = sb.clone();
 
-    let mut i = ub.take_indications().await.unwrap();
+    let mut i = sb.take_indications().await.unwrap();
     let print_messages = async move {
         while let Some(i) = i.recv().await {
             println!("[{}]: {:?}", i.sender, i.message);
@@ -49,7 +49,7 @@ async fn main() {
     };
 
     let broadcast_input = async |input: String| {
-        ub_cpy
+        sb_cpy
             .broadcast(&serde_json::to_value(input).unwrap())
             .await?;
         Ok::<(), LinkError>(())
@@ -59,7 +59,7 @@ async fn main() {
     input_handler.clone().start();
 
     tokio::try_join!(
-        ub.listen(),
+        sb.listen(),
         print_messages,
         input_handler.handle_input(broadcast_input)
     )
