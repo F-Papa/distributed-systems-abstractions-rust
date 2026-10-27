@@ -10,6 +10,7 @@ use crate::{
     broadcast::{
         best_effort::{BasicBroadcast, BestEffortBroadcast},
         reliable::{EagerReliableBroadcast, ReliableBroadcast},
+        uniform::{MajorityAckBroadcast, UniformBroadcast},
     },
     common::NodeId,
     crypto, factory,
@@ -171,6 +172,17 @@ pub fn reliable_broadcast(
 ) -> Arc<dyn ReliableBroadcast<Value>> {
     Arc::from(EagerReliableBroadcast::new(
         config.local_id,
+        best_effort_broadcast(fair_loss_link, config),
+    ))
+}
+
+pub fn uniform_broadcast(
+    fair_loss_link: FairLossLink,
+    config: &ClusterConfig,
+) -> Arc<dyn UniformBroadcast<Value>> {
+    Arc::from(MajorityAckBroadcast::new(
+        config.local_id,
+        config.number_of_nodes,
         best_effort_broadcast(fair_loss_link, config),
     ))
 }
