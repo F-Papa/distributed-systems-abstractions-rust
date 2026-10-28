@@ -48,8 +48,7 @@ async fn main() {
     .await
     .unwrap();
 
-    let register = factory::one_many_regular_register::<usize>(fll1, fll2, &cluster_config);
-    let register_cpy = register.clone();
+    let register = factory::one_one_atomic_register::<usize>(fll1, fll2, &cluster_config);
 
     let mut i = register.take_indications().await.unwrap();
     let print_returns = async move {
@@ -59,6 +58,7 @@ async fn main() {
         Ok::<(), LinkError>(())
     };
 
+    let register_cpy = register.clone();
     let write_input = async |input: String| {
         if local_id.get() == 1 {
             register_cpy

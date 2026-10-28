@@ -33,11 +33,15 @@ use crate::{
         perfect_link::{AcknowledgeMessages, PerfectLink},
         stubborn_link::{RetransmitForever, StubbornLink},
     },
-    registers::regular::{OneManyRegularRegister, WriteOneReadAll},
+    registers::{
+        atomic::{OneOneAtomicRegister, WriteOneReadOneAtomic},
+        regular::{OneManyRegularRegister, WriteOneReadAll},
+    },
 };
 
 // Args
 
+#[derive(Clone)]
 pub struct ClusterConfig {
     pub local_id: NodeId,
     pub number_of_nodes: u16,
@@ -216,4 +220,22 @@ where
         perfect_link(fair_loss_link_1, config),
         best_effort_broadcast(fair_loss_link_2, config),
     ))
+}
+
+pub fn one_one_atomic_register<T>(
+    fair_loss_link_1: FairLossLink,
+    fair_loss_link_2: FairLossLink,
+    config: &ClusterConfig,
+) -> Arc<dyn OneOneAtomicRegister<T>>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    let mut config2 = config.clone();
+    config2.number_of_nodes = 2;
+
+    Arc::from(WriteOneReadOneAtomic::new(one_many_regular_register(
+        fair_loss_link_1,
+        fair_loss_link_2,
+        &config2,
+    )))
 }
