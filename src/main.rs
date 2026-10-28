@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
+
+use log::error;
 
 use crate::{
     common::{InputHandler, NodeId},
@@ -13,6 +15,7 @@ pub mod factory;
 pub mod failure_detector;
 pub mod leader_election;
 pub mod links;
+pub mod registers;
 
 #[tokio::main]
 async fn main() {
@@ -32,26 +35,47 @@ async fn main() {
         local_id,
     };
 
-    let fll = FairLossLink::new(local_id, Box::from(LocalhostResolver { base_port }))
+    let fll1 = FairLossLink::new(local_id, Box::from(LocalhostResolver { base_port }))
         .await
         .unwrap();
 
-    let sb = factory::stubborn_broadcast(fll, &cluster_config);
-    let sb_cpy = sb.clone();
+    let fll2 = FairLossLink::new(
+        local_id,
+        Box::from(LocalhostResolver {
+            base_port: base_port + 1000,
+        }),
+    )
+    .await
+    .unwrap();
 
-    let mut i = sb.take_indications().await.unwrap();
-    let print_messages = async move {
+    let register = factory::one_many_regular_register::<usize>(fll1, fll2, &cluster_config);
+    let register_cpy = register.clone();
+
+    let mut i = register.take_indications().await.unwrap();
+    let print_returns = async move {
         while let Some(i) = i.recv().await {
-            println!("[{}]: {:?}", i.sender, i.message);
+            println!("{:?}", i);
         }
-        let res: Result<(), LinkError> = Ok(());
-        res
+        Ok::<(), LinkError>(())
     };
 
-    let broadcast_input = async |input: String| {
-        sb_cpy
-            .broadcast(&serde_json::to_value(input).unwrap())
-            .await?;
+    let write_input = async |input: String| {
+        if local_id.get() == 1 {
+            register_cpy
+                .write(&input.strip_suffix("\n").unwrap().parse::<usize>().unwrap())
+                .await?;
+        } else {
+            error!("Only node 1 can write");
+        }
+        Ok::<(), LinkError>(())
+    };
+
+    let register_cpy2 = register_cpy.clone();
+    let read_value = async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            register_cpy2.read().await;
+        }
         Ok::<(), LinkError>(())
     };
 
@@ -59,9 +83,10 @@ async fn main() {
     input_handler.clone().start();
 
     tokio::try_join!(
-        sb.listen(),
-        print_messages,
-        input_handler.handle_input(broadcast_input)
+        register.start(),
+        print_returns,
+        input_handler.handle_input(write_input),
+        read_value
     )
     .unwrap();
 }

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+dashmap = "6.2"
 ed25519-dalek = { version = "3", features = ["rand_core"] }
 getrandom = { version = "0.4", features = ["sys_rng"] }
 rand_core = { version = "0.6", features = ["getrandom"] }

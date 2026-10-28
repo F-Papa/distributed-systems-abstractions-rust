@@ -4,6 +4,7 @@ use std::{
 };
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::{
@@ -28,10 +29,11 @@ use crate::{
     },
     links::{
         auth_perfect_link::{AuthenticatedPerfectLink, SignAndAcknowledge},
-        fair_loss_link::FairLossLink,
+        fair_loss_link::{self, FairLossLink},
         perfect_link::{AcknowledgeMessages, PerfectLink},
         stubborn_link::{RetransmitForever, StubbornLink},
     },
+    registers::regular::{OneManyRegularRegister, ReadOneWriteAll},
 };
 
 // Args
@@ -196,5 +198,19 @@ pub fn stubborn_broadcast(
         config.local_id,
         config.peers(),
         stubborn_link(fair_loss_link, config),
+    ))
+}
+
+// Registers
+
+pub fn one_many_regular_register<T>(
+    fair_loss_link_1: FairLossLink,
+    fair_loss_link_2: FairLossLink,
+    config: &ClusterConfig,
+) -> Arc<dyn OneManyRegularRegister<T>> where T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static {
+    Arc::from(ReadOneWriteAll::new(
+        config.number_of_nodes,
+        perfect_link(fair_loss_link_1, config),
+        best_effort_broadcast(fair_loss_link_2, config),
     ))
 }
