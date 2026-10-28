@@ -33,7 +33,7 @@ use crate::{
         perfect_link::{AcknowledgeMessages, PerfectLink},
         stubborn_link::{RetransmitForever, StubbornLink},
     },
-    registers::regular::{OneManyRegularRegister, ReadOneWriteAll},
+    registers::regular::{OneManyRegularRegister, WriteOneReadAll},
 };
 
 // Args
@@ -207,8 +207,11 @@ pub fn one_many_regular_register<T>(
     fair_loss_link_1: FairLossLink,
     fair_loss_link_2: FairLossLink,
     config: &ClusterConfig,
-) -> Arc<dyn OneManyRegularRegister<T>> where T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static {
-    Arc::from(ReadOneWriteAll::new(
+) -> Arc<dyn OneManyRegularRegister<T>>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    Arc::from(WriteOneReadAll::new(
         config.number_of_nodes,
         perfect_link(fair_loss_link_1, config),
         best_effort_broadcast(fair_loss_link_2, config),

@@ -62,7 +62,7 @@ async fn main() {
     let write_input = async |input: String| {
         if local_id.get() == 1 {
             register_cpy
-                .write(&input.strip_suffix("\n").unwrap().parse::<usize>().unwrap())
+                .write(input.strip_suffix("\n").unwrap().parse::<usize>().unwrap())
                 .await?;
         } else {
             error!("Only node 1 can write");

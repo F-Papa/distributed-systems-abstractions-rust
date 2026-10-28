@@ -1,5 +1,6 @@
 use std::sync::{
-    Arc, atomic::{AtomicU16, AtomicU32, Ordering},
+    Arc,
+    atomic::{AtomicU16, AtomicU32, Ordering},
 };
 
 use async_trait::async_trait;
@@ -16,13 +17,8 @@ use crate::{
         LinkError::{self, InternalError},
         perfect_link::PerfectLink,
     },
+    registers::RegisterIndication,
 };
-
-#[derive(Debug)]
-pub enum RegisterIndication<T> {
-    ReadReturn(T),
-    WriteReturn,
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 enum RegisterMessage<T> {
@@ -33,18 +29,18 @@ enum RegisterMessage<T> {
 }
 
 #[async_trait]
-pub trait OneManyRegularRegister<T>
+pub trait OneManyRegularRegister<T>: Send + Sync
 where
     T: Send + Sync + Serialize,
 {
     async fn read(&self) -> Result<(), LinkError>;
-    async fn write(&self, value: &T) -> Result<(), LinkError>;
+    async fn write(&self, value: T) -> Result<(), LinkError>;
     async fn take_indications(&self) -> Option<mpsc::Receiver<RegisterIndication<T>>>;
     async fn start(&self) -> Result<(), LinkError>;
     async fn stop(&self);
 }
 
-pub struct ReadOneWriteAll<T>
+pub struct WriteOneReadAll<T>
 where
     T: Send + Sync + Serialize,
 {
@@ -62,7 +58,7 @@ where
 }
 
 #[async_trait]
-impl<T> OneManyRegularRegister<T> for ReadOneWriteAll<T>
+impl<T> OneManyRegularRegister<T> for WriteOneReadAll<T>
 where
     T: Send + Sync + Serialize + DeserializeOwned + Clone,
 {
@@ -88,27 +84,29 @@ where
     async fn read(&self) -> Result<(), LinkError> {
         let request_id =
             self.current_request_id
-                .update(Ordering::Relaxed, Ordering::Relaxed, |rid| rid + 1) + 1;
+                .update(Ordering::Relaxed, Ordering::Relaxed, |rid| rid + 1)
+                + 1;
         self.readlist.clear();
         let message: RegisterMessage<T> = RegisterMessage::Read { request_id };
         let encoded = serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?;
         self.broadcast.broadcast(&encoded).await
     }
 
-    async fn write(&self, value: &T) -> Result<(), LinkError> {
+    async fn write(&self, value: T) -> Result<(), LinkError> {
         debug!("writing");
         let timestamp = self
             .write_timestamp
-            .update(Ordering::Relaxed, Ordering::Relaxed, |ts| ts + 1) + 1;
+            .update(Ordering::Relaxed, Ordering::Relaxed, |ts| ts + 1)
+            + 1;
         self.acks.store(0, Ordering::Relaxed);
         debug!("writing with timestamp {timestamp}");
-        let message: RegisterMessage<&T> = RegisterMessage::Write { timestamp, value };
+        let message: RegisterMessage<T> = RegisterMessage::Write { timestamp, value };
         let encoded = serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?;
         self.broadcast.broadcast(&encoded).await
     }
 }
 
-impl<T> ReadOneWriteAll<T>
+impl<T> WriteOneReadAll<T>
 where
     T: Send + Sync + Serialize + DeserializeOwned + Clone,
 {
@@ -154,7 +152,8 @@ where
                     *val = Some(value);
                     self.timestamp.store(timestamp, Ordering::Relaxed);
                     let response = RegisterMessage::<T>::Ack { timestamp };
-                    let encoded = serde_json::to_value(response).map_err(|e| InternalError(e.to_string()))?;
+                    let encoded =
+                        serde_json::to_value(response).map_err(|e| InternalError(e.to_string()))?;
                     self.link.send(&encoded, delivery.sender).await?;
                 }
             } else if let RegisterMessage::Read { request_id } = message {
@@ -221,7 +220,8 @@ where
                 if timestamp == self.write_timestamp.load(Ordering::Relaxed) {
                     let acks = self
                         .acks
-                        .update(Ordering::Relaxed, Ordering::Relaxed, |acks| acks + 1) + 1;
+                        .update(Ordering::Relaxed, Ordering::Relaxed, |acks| acks + 1)
+                        + 1;
 
                     if acks >= self.majority {
                         self.acks.store(0, Ordering::Relaxed);
