@@ -34,7 +34,7 @@ use crate::{
         stubborn_link::{RetransmitForever, StubbornLink},
     },
     registers::{
-        atomic::{OneOneAtomicRegister, WriteOneReadOneAtomic},
+        atomic::write_one_read_many::{OneManyAtomicRegister, WriteOneReadManyAtomic},
         regular::{OneManyRegularRegister, WriteOneReadAll},
     },
 };
@@ -222,20 +222,17 @@ where
     ))
 }
 
-pub fn one_one_atomic_register<T>(
+pub fn one_many_atomic_register<T>(
     fair_loss_link_1: FairLossLink,
     fair_loss_link_2: FairLossLink,
     config: &ClusterConfig,
-) -> Arc<dyn OneOneAtomicRegister<T>>
+) -> Arc<dyn OneManyAtomicRegister<T>>
 where
     T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
 {
-    let mut config2 = config.clone();
-    config2.number_of_nodes = 2;
-
-    Arc::from(WriteOneReadOneAtomic::new(one_many_regular_register(
-        fair_loss_link_1,
-        fair_loss_link_2,
-        &config2,
-    )))
+    Arc::from(WriteOneReadManyAtomic::new(
+        config.number_of_nodes,
+        best_effort_broadcast(fair_loss_link_1, config),
+        perfect_link(fair_loss_link_2, config),
+    ))
 }
