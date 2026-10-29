@@ -1,3 +1,5 @@
+use std::io;
+
 use log::debug;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -142,13 +144,22 @@ impl FairLossLink {
             .send_to(&bytes, addr)
             .await
             .map_err(|e| LinkError::SocketError(e.to_string()))?;
-        debug!("Sending {} bytes to {}", bytes.len(), recipient);
+        debug!(
+            "[{}] Sending {} bytes to {}",
+            self.port().unwrap(),
+            bytes.len(),
+            recipient
+        );
 
         Ok(())
     }
 
     pub async fn close(&self) {
         self.shutdown_handler.shutdown().await
+    }
+
+    fn port(&self) -> io::Result<u16> {
+        self.socket.local_addr().map(|addr| addr.port())
     }
 
     pub async fn listen(&self) -> Result<(), LinkError> {
@@ -175,7 +186,12 @@ impl FairLossLink {
                 Ok(e) => e,
             };
 
-            debug!("{} bytes from {}", len, envelope.sender);
+            debug!(
+                "[{}] {} bytes from {}",
+                self.port().unwrap(),
+                len,
+                envelope.sender
+            );
             if envelope.recipient != self.local_id {
                 debug!(
                     "dropped message from {} because of wrong recipient {}",
