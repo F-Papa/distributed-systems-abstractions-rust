@@ -97,7 +97,7 @@ where
 
         while let Some(indication) = indications.recv().await {
             match indication {
-                RegisterIndication::ReadReturn((timestamp, value)) => {
+                RegisterIndication::ReadReturn(Some((timestamp, value))) => {
                     let last_timestamp = self.last_timestamp.load(Ordering::Relaxed);
                     debug!(
                         "read timestamp: {}, last_timestamp: {}",
@@ -107,10 +107,15 @@ where
                         let mut value_guard = self.val.lock().await;
                         *value_guard = Some(value.clone());
                         self.last_timestamp.store(timestamp, Ordering::Relaxed);
-                        tx.send(RegisterIndication::<T>::ReadReturn(value))
+                        tx.send(RegisterIndication::<T>::ReadReturn(Some(value)))
                             .await
                             .map_err(|e| LinkError::InternalError(e.to_string()))?;
                     }
+                }
+                RegisterIndication::ReadReturn(None) => {
+                    tx.send(RegisterIndication::<T>::ReadReturn(None))
+                        .await
+                        .map_err(|e| LinkError::InternalError(e.to_string()))?;
                 }
                 RegisterIndication::WriteReturn => {
                     tx.send(RegisterIndication::<T>::WriteReturn)

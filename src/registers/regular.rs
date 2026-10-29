@@ -20,14 +20,6 @@ use crate::{
     registers::RegisterIndication,
 };
 
-#[derive(Serialize, Deserialize, Debug)]
-enum RegisterMessage<T> {
-    Write { timestamp: u32, value: T },
-    Ack { timestamp: u32 },
-    Read { request_id: u32 },
-    Value { request_id: u32, ts: u32, value: T },
-}
-
 #[async_trait]
 pub trait OneManyRegularRegister<T>: Send + Sync
 where
@@ -50,11 +42,19 @@ where
     write_timestamp: AtomicU32,
     acks: AtomicU16,
     current_request_id: AtomicU32,
-    readlist: DashMap<NodeId, (u32, T)>,
+    readlist: DashMap<NodeId, (u32, Option<T>)>,
     link: Arc<dyn PerfectLink<Value>>,
     broadcast: Arc<dyn BestEffortBroadcast<Value>>,
     indications: Arc<Mutex<Option<mpsc::Receiver<RegisterIndication<T>>>>>,
     indications_tx: Mutex<Option<mpsc::Sender<RegisterIndication<T>>>>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum RegisterMessage<T> {
+    Write { timestamp: u32, value: T },
+    Ack { timestamp: u32 },
+    Read { request_id: u32 },
+    Value { request_id: u32, ts: u32, value: T },
 }
 
 #[async_trait]
@@ -138,7 +138,8 @@ where
         };
 
         while let Some(delivery) = indications.recv().await {
-            let message: RegisterMessage<T> = match serde_json::from_value(delivery.message) {
+            let message: RegisterMessage<Option<T>> = match serde_json::from_value(delivery.message)
+            {
                 Ok(m) => m,
                 Err(e) => {
                     debug!("error deserializing broadcast envelope: {e}");
@@ -149,7 +150,7 @@ where
             if let RegisterMessage::Write { timestamp, value } = message {
                 if timestamp > self.timestamp.load(Ordering::Relaxed) {
                     let mut val = self.val.lock().await;
-                    *val = Some(value);
+                    *val = value;
                     self.timestamp.store(timestamp, Ordering::Relaxed);
                     let response = RegisterMessage::<T>::Ack { timestamp };
                     let encoded =
@@ -184,15 +185,15 @@ where
         };
 
         while let Some(delivery) = indications.recv().await {
-            let message: RegisterMessage<T> = match serde_json::from_value(delivery.message.clone())
-            {
-                Ok(m) => m,
-                Err(e) => {
-                    debug!("error deserializing link envelope: {e}");
-                    debug!("message: {:?}", delivery.message);
-                    continue;
-                }
-            };
+            let message: RegisterMessage<Option<T>> =
+                match serde_json::from_value(delivery.message.clone()) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        debug!("error deserializing link envelope: {e}");
+                        debug!("message: {:?}", delivery.message);
+                        continue;
+                    }
+                };
 
             if let RegisterMessage::Value {
                 request_id,
@@ -200,9 +201,10 @@ where
                 value,
             } = message
             {
-                if request_id == self.current_request_id.load(Ordering::Relaxed) {
-                    self.readlist.insert(delivery.sender, (ts, value));
+                if request_id != self.current_request_id.load(Ordering::Relaxed) {
+                    continue;
                 }
+                self.readlist.insert(delivery.sender, (ts, value));
 
                 debug!(
                     "#readlist: {} majority: {}",
@@ -210,8 +212,11 @@ where
                     self.majority
                 );
                 if self.readlist.len() >= self.majority as usize {
-                    let v = &self.highest_val(&self.readlist).unwrap().1;
-                    let read_return = RegisterIndication::ReadReturn(v.clone());
+                    let highest_val = match &self.highest_val(&self.readlist) {
+                        Some(v) => Some(v.1.clone()),
+                        None => None,
+                    };
+                    let read_return = RegisterIndication::ReadReturn(highest_val.unwrap());
                     tx.send(read_return)
                         .await
                         .map_err(|e| InternalError(e.to_string()))?;
@@ -237,8 +242,8 @@ where
 
     fn highest_val<'a>(
         &'a self,
-        readlist: &'a DashMap<NodeId, (u32, T)>,
-    ) -> Option<Ref<'a, NodeId, (u32, T)>> {
+        readlist: &'a DashMap<NodeId, (u32, Option<T>)>,
+    ) -> Option<Ref<'a, NodeId, (u32, Option<T>)>> {
         let highest_key = readlist
             .iter()
             .map(|entry| (*entry.key(), entry.value().0))

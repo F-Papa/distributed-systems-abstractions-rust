@@ -3,6 +3,6 @@ pub mod regular;
 
 #[derive(Debug)]
 pub enum RegisterIndication<T> {
-    ReadReturn(T),
+    ReadReturn(Option<T>),
     WriteReturn,
 }
