@@ -1,10 +1,4 @@
-use std::{
-    collections::HashSet,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
-};
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use log::debug;
@@ -47,13 +41,17 @@ pub trait ByzantineLeaderElection {
     async fn complain(&self) -> Result<(), LinkError>;
 }
 
+struct State {
+    complained: bool,
+    round: usize,
+}
+
 pub struct RotatingElection {
+    state: Mutex<State>,
     link: Arc<dyn AuthenticatedPerfectLink<Value>>,
     max_faulty_nodes: usize,
     indications_tx: Mutex<Option<mpsc::Sender<Leader>>>,
     indications: Arc<Mutex<Option<mpsc::Receiver<Leader>>>>,
-    complained: AtomicBool,
-    round: AtomicUsize,
     peers: HashSet<NodeId>,
     nodes: Vec<NodeId>,
 }
@@ -72,9 +70,9 @@ impl ByzantineLeaderElection for RotatingElection {
         self.indications.lock().await.take()
     }
     async fn complain(&self) -> Result<(), LinkError> {
-        self.complained.swap(true, Ordering::Relaxed);
-        let complaint = Complaint(self.get_round());
-
+        let mut state = self.state.lock().await;
+        state.complained = true;
+        let complaint = Complaint(state.round);
         let envelope = Envelope {
             protocol: Protocol::RotatingElection,
             message: complaint,
@@ -103,26 +101,18 @@ impl RotatingElection {
             peers,
             nodes,
             max_faulty_nodes,
-            round: AtomicUsize::from(1),
+            state: Mutex::from(State {
+                round: 1,
+                complained: false,
+            }),
             indications: Arc::from(Mutex::from(Some(indications))),
             indications_tx: Mutex::from(Some(indications_tx)),
-            complained: AtomicBool::from(false),
         }
     }
 
-    fn round_leader(&self) -> NodeId {
-        let idx = self.get_round() % self.nodes.len();
+    fn round_leader(&self, state: &State) -> NodeId {
+        let idx = state.round % self.nodes.len();
         *self.nodes.get(idx).unwrap()
-    }
-
-    fn advance_round(&self) {
-        debug!("Advancing round");
-        self.round
-            .update(Ordering::Relaxed, Ordering::Relaxed, |f| f + 1);
-    }
-
-    fn get_round(&self) -> usize {
-        self.round.load(Ordering::Relaxed)
     }
 
     async fn handle_link_indications(&self) -> Result<(), LinkError> {
@@ -150,27 +140,24 @@ impl RotatingElection {
                 "complaint received from node {} for round {}",
                 indication.sender, envelope.message.0
             );
-            if self.get_round() != envelope.message.0 || complain_list.contains(&indication.sender)
-            {
+            let mut state = self.state.lock().await;
+            if state.round != envelope.message.0 || complain_list.contains(&indication.sender) {
                 continue;
             }
 
             complain_list.insert(indication.sender);
 
-            if complain_list.len() > self.max_faulty_nodes
-                && !self.complained.load(Ordering::Relaxed)
-            {
+            if complain_list.len() > self.max_faulty_nodes && !state.complained {
                 debug!("Joining complaints");
                 self.complain().await?;
             } else if complain_list.len() > 2 * self.max_faulty_nodes {
                 // len > 2f: the previous condition doesn't guarantee that every node will complain
                 // (especially if most complainers are byzantine). Once len > 2f, then it will
                 // eventually propagate.
-                self.advance_round();
+                state.round += 1;
                 complain_list.clear();
-                self.complained.store(false, Ordering::Relaxed);
-
-                let leader = self.round_leader();
+                state.complained = false;
+                let leader = self.round_leader(&state);
                 indications_tx
                     .send(Leader { node_id: leader })
                     .await
