@@ -48,25 +48,21 @@ async fn main() {
     .await
     .unwrap();
 
-    let register = factory::one_many_atomic_register::<usize>(fll1, fll2, &cluster_config);
+    let register = factory::atomic_register::<usize>(fll1, fll2, &cluster_config);
 
     let mut i = register.take_indications().await.unwrap();
     let print_returns = async move {
         while let Some(i) = i.recv().await {
-            println!("{:?}", i);
+            println!("\n{:?}\n", i);
         }
         Ok::<(), LinkError>(())
     };
 
     let register_cpy = register.clone();
     let write_input = async |input: String| {
-        if local_id.get() == 1 {
-            register_cpy
-                .write(input.strip_suffix("\n").unwrap().parse::<usize>().unwrap())
-                .await?;
-        } else {
-            error!("Only node 1 can write");
-        }
+        register_cpy
+            .write(input.strip_suffix("\n").unwrap().parse::<usize>().unwrap())
+            .await?;
         Ok::<(), LinkError>(())
     };
 

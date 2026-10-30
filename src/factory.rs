@@ -13,29 +13,22 @@ use crate::{
         reliable::{EagerReliableBroadcast, ReliableBroadcast},
         stubborn::{BasicStubbonBroadcast, StubbornBroadcast},
         uniform::{MajorityAckBroadcast, UniformBroadcast},
-    },
-    common::NodeId,
-    crypto, factory,
-    failure_detector::{
+    }, common::NodeId, crypto, factory, failure_detector::{
         eventually_perfect_failure_detector::{
             EventuallyPerfectFailureDetector, IncreasingTimeout,
         },
         perfect_failure_detector::{ExcludeOnTimeout, PerfectFailureDetector},
-    },
-    leader_election::{
+    }, leader_election::{
         LeaderElection, MonarchicalLeaderElection,
         byzantine_leader_election::{ByzantineLeaderElection, RotatingElection},
         eventual_leader_elector::{EventualLeaderElection, MonarchicalEventualLeaderElector},
-    },
-    links::{
+    }, links::{
         auth_perfect_link::{AuthenticatedPerfectLink, SignAndAcknowledge},
         fair_loss_link::{self, FairLossLink},
         perfect_link::{AcknowledgeMessages, PerfectLink},
         stubborn_link::{RetransmitForever, StubbornLink},
-    },
-    registers::{
-        atomic::write_one_read_many::{OneManyAtomicRegister, WriteOneReadManyAtomic},
-        regular::{OneManyRegularRegister, WriteOneReadAll},
+    }, registers::{
+        atomic::{write_many_read_many::{AtomicRegister, ConsultMajorityRegister}, write_one_read_many::{OneManyAtomicRegister, WriteOneReadManyAtomic}}, regular::{OneManyRegularRegister, WriteOneReadAll},
     },
 };
 
@@ -236,3 +229,19 @@ where
         perfect_link(fair_loss_link_2, config),
     ))
 }
+
+pub fn atomic_register<T>(
+    fair_loss_link_1: FairLossLink,
+    fair_loss_link_2: FairLossLink,
+    config: &ClusterConfig
+) -> Arc<dyn AtomicRegister<T>> 
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static {
+    Arc::from(ConsultMajorityRegister::new(
+        config.local_id,
+        config.number_of_nodes,
+        best_effort_broadcast(fair_loss_link_1, config),
+        perfect_link(fair_loss_link_2, config),
+    ))
+}
+
