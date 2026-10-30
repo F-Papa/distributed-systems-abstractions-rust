@@ -1,10 +1,6 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU16, AtomicU32, Ordering},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use dashmap::{DashMap, mapref::one::Ref};
 use log::debug;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -32,17 +28,21 @@ where
     async fn stop(&self);
 }
 
+struct State<T> {
+    timestamp: u32,
+    write_timestamp: u32,
+    val: Option<T>,
+    acks: u32,
+    request_id: u32,
+    readlist: HashMap<NodeId, (u32, Option<T>)>,
+}
+
 pub struct WriteOneReadAll<T>
 where
     T: Send + Sync + Serialize,
 {
+    state: Mutex<State<T>>,
     majority: u16,
-    timestamp: AtomicU32,
-    val: Arc<Mutex<Option<T>>>,
-    write_timestamp: AtomicU32,
-    acks: AtomicU16,
-    current_request_id: AtomicU32,
-    readlist: DashMap<NodeId, (u32, Option<T>)>,
     link: Arc<dyn PerfectLink<Value>>,
     broadcast: Arc<dyn BestEffortBroadcast<Value>>,
     indications: Arc<Mutex<Option<mpsc::Receiver<RegisterIndication<T>>>>>,
@@ -82,25 +82,26 @@ where
     }
 
     async fn read(&self) -> Result<(), LinkError> {
-        let request_id =
-            self.current_request_id
-                .update(Ordering::Relaxed, Ordering::Relaxed, |rid| rid + 1)
-                + 1;
-        self.readlist.clear();
-        let message: RegisterMessage<T> = RegisterMessage::Read { request_id };
+        let mut state = self.state.lock().await;
+        state.request_id += 1;
+        state.readlist.clear();
+        let message: RegisterMessage<T> = RegisterMessage::Read {
+            request_id: state.request_id,
+        };
         let encoded = serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?;
         self.broadcast.broadcast(&encoded).await
     }
 
     async fn write(&self, value: T) -> Result<(), LinkError> {
         debug!("writing");
-        let timestamp = self
-            .write_timestamp
-            .update(Ordering::Relaxed, Ordering::Relaxed, |ts| ts + 1)
-            + 1;
-        self.acks.store(0, Ordering::Relaxed);
-        debug!("writing with timestamp {timestamp}");
-        let message: RegisterMessage<T> = RegisterMessage::Write { timestamp, value };
+        let mut state = self.state.lock().await;
+        state.write_timestamp += 1;
+        state.acks = 0;
+        debug!("writing with timestamp {}", state.timestamp);
+        let message: RegisterMessage<T> = RegisterMessage::Write {
+            timestamp: state.write_timestamp,
+            value,
+        };
         let encoded = serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?;
         self.broadcast.broadcast(&encoded).await
     }
@@ -118,12 +119,14 @@ where
         let (tx, rx) = mpsc::channel(32);
         Self {
             majority: number_of_nodes / 2 + 1,
-            timestamp: AtomicU32::new(0),
-            val: Arc::from(Mutex::from(None)),
-            write_timestamp: AtomicU32::new(0),
-            acks: AtomicU16::new(0),
-            current_request_id: AtomicU32::new(0),
-            readlist: DashMap::with_capacity(number_of_nodes as usize),
+            state: Mutex::from(State {
+                timestamp: 0,
+                acks: 0,
+                write_timestamp: 0,
+                request_id: 0,
+                readlist: HashMap::new(),
+                val: None,
+            }),
             link,
             broadcast,
             indications: Arc::from(Mutex::from(Some(rx))),
@@ -147,22 +150,21 @@ where
                 }
             };
 
+            let mut state = self.state.lock().await;
             if let RegisterMessage::Write { timestamp, value } = message {
-                if timestamp > self.timestamp.load(Ordering::Relaxed) {
-                    let mut val = self.val.lock().await;
-                    *val = value;
-                    self.timestamp.store(timestamp, Ordering::Relaxed);
+                if timestamp > state.timestamp {
+                    state.val = value;
+                    state.timestamp = timestamp;
                     let response = RegisterMessage::<T>::Ack { timestamp };
                     let encoded =
                         serde_json::to_value(response).map_err(|e| InternalError(e.to_string()))?;
                     self.link.send(&encoded, delivery.sender).await?;
                 }
             } else if let RegisterMessage::Read { request_id } = message {
-                let val = self.val.lock().await;
                 let response = RegisterMessage::Value {
                     request_id,
-                    ts: self.timestamp.load(Ordering::Relaxed),
-                    value: &*val,
+                    ts: state.timestamp,
+                    value: &state.val,
                 };
                 let encoded =
                     serde_json::to_value(&response).map_err(|e| InternalError(e.to_string()))?;
@@ -195,24 +197,25 @@ where
                     }
                 };
 
+            let mut state = self.state.lock().await;
             if let RegisterMessage::Value {
                 request_id,
                 ts,
                 value,
             } = message
             {
-                if request_id != self.current_request_id.load(Ordering::Relaxed) {
+                if request_id != state.request_id {
                     continue;
                 }
-                self.readlist.insert(delivery.sender, (ts, value));
+                state.readlist.insert(delivery.sender, (ts, value));
 
                 debug!(
                     "#readlist: {} majority: {}",
-                    self.readlist.len(),
+                    state.readlist.len(),
                     self.majority
                 );
-                if self.readlist.len() >= self.majority as usize {
-                    let highest_val = match &self.highest_val(&self.readlist) {
+                if state.readlist.len() >= self.majority as usize {
+                    let highest_val = match &self.highest_val(&state.readlist) {
                         Some(v) => Some(v.1.clone()),
                         None => None,
                     };
@@ -222,14 +225,11 @@ where
                         .map_err(|e| InternalError(e.to_string()))?;
                 }
             } else if let RegisterMessage::Ack { timestamp } = message {
-                if timestamp == self.write_timestamp.load(Ordering::Relaxed) {
-                    let acks = self
-                        .acks
-                        .update(Ordering::Relaxed, Ordering::Relaxed, |acks| acks + 1)
-                        + 1;
+                if timestamp == state.write_timestamp {
+                    state.acks += 1;
 
-                    if acks >= self.majority {
-                        self.acks.store(0, Ordering::Relaxed);
+                    if state.acks >= self.majority as u32 {
+                        state.acks = 0;
                         tx.send(RegisterIndication::WriteReturn)
                             .await
                             .map_err(|e| InternalError(e.to_string()))?;
@@ -242,14 +242,11 @@ where
 
     fn highest_val<'a>(
         &'a self,
-        readlist: &'a DashMap<NodeId, (u32, Option<T>)>,
-    ) -> Option<Ref<'a, NodeId, (u32, Option<T>)>> {
-        let highest_key = readlist
+        readlist: &'a HashMap<NodeId, (u32, Option<T>)>,
+    ) -> Option<(u32, Option<T>)> {
+        readlist
             .iter()
-            .map(|entry| (*entry.key(), entry.value().0))
-            .max_by_key(|(_, timestamp)| *timestamp)
-            .map(|(key, _)| key)?;
-
-        readlist.get(&highest_key)
+            .max_by_key(|(_, (ts, _))| *ts)
+            .map(|(_, (ts, val))| (*ts, val.clone()))
     }
 }
