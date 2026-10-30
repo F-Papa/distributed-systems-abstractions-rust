@@ -82,28 +82,32 @@ where
     }
 
     async fn read(&self) -> Result<(), LinkError> {
-        let mut state = self.state.lock().await;
-        state.request_id += 1;
-        state.readlist.clear();
-        let message: RegisterMessage<T> = RegisterMessage::Read {
-            request_id: state.request_id,
+        let message = {
+            let mut state = self.state.lock().await;
+            state.request_id += 1;
+            state.readlist.clear();
+            let message: RegisterMessage<T> = RegisterMessage::Read {
+                request_id: state.request_id,
+            };
+            serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?
         };
-        let encoded = serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?;
-        self.broadcast.broadcast(&encoded).await
+        self.broadcast.broadcast(&message).await
     }
 
     async fn write(&self, value: T) -> Result<(), LinkError> {
         debug!("writing");
-        let mut state = self.state.lock().await;
-        state.write_timestamp += 1;
-        state.acks = 0;
-        debug!("writing with timestamp {}", state.timestamp);
-        let message: RegisterMessage<T> = RegisterMessage::Write {
-            timestamp: state.write_timestamp,
-            value,
+        let message = {
+            let mut state = self.state.lock().await;
+            state.write_timestamp += 1;
+            state.acks = 0;
+            debug!("writing with timestamp {}", state.timestamp);
+            let message: RegisterMessage<T> = RegisterMessage::Write {
+                timestamp: state.write_timestamp,
+                value,
+            };
+            serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?
         };
-        let encoded = serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?;
-        self.broadcast.broadcast(&encoded).await
+        self.broadcast.broadcast(&message).await
     }
 }
 
@@ -150,25 +154,32 @@ where
                 }
             };
 
-            let mut state = self.state.lock().await;
+            let mut response: Option<Value> = None;
+
             if let RegisterMessage::Write { timestamp, value } = message {
+                let mut state = self.state.lock().await;
                 if timestamp > state.timestamp {
                     state.val = value;
                     state.timestamp = timestamp;
-                    let response = RegisterMessage::<T>::Ack { timestamp };
-                    let encoded =
-                        serde_json::to_value(response).map_err(|e| InternalError(e.to_string()))?;
-                    self.link.send(&encoded, delivery.sender).await?;
+                    response = Some(
+                        serde_json::to_value(RegisterMessage::<T>::Ack { timestamp })
+                            .map_err(|e| InternalError(e.to_string()))?,
+                    );
                 }
             } else if let RegisterMessage::Read { request_id } = message {
-                let response = RegisterMessage::Value {
+                let state = self.state.lock().await;
+                let message = RegisterMessage::Value {
                     request_id,
                     ts: state.timestamp,
                     value: &state.val,
                 };
-                let encoded =
-                    serde_json::to_value(&response).map_err(|e| InternalError(e.to_string()))?;
-                self.link.send(&encoded, delivery.sender).await?;
+
+                response =
+                    Some(serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?);
+            };
+
+            if let Some(r) = response {
+                self.link.send(&r, delivery.sender).await?;
             }
         }
 
@@ -197,13 +208,14 @@ where
                     }
                 };
 
-            let mut state = self.state.lock().await;
+            let mut indication = None;
             if let RegisterMessage::Value {
                 request_id,
                 ts,
                 value,
             } = message
             {
+                let mut state = self.state.lock().await;
                 if request_id != state.request_id {
                     continue;
                 }
@@ -219,22 +231,23 @@ where
                         Some(v) => Some(v.1.clone()),
                         None => None,
                     };
-                    let read_return = RegisterIndication::ReadReturn(highest_val.unwrap());
-                    tx.send(read_return)
-                        .await
-                        .map_err(|e| InternalError(e.to_string()))?;
+                    indication = Some(RegisterIndication::ReadReturn(highest_val.unwrap()));
                 }
             } else if let RegisterMessage::Ack { timestamp } = message {
+                let mut state = self.state.lock().await;
                 if timestamp == state.write_timestamp {
                     state.acks += 1;
 
                     if state.acks >= self.majority as u32 {
                         state.acks = 0;
-                        tx.send(RegisterIndication::WriteReturn)
-                            .await
-                            .map_err(|e| InternalError(e.to_string()))?;
+                        indication = Some(RegisterIndication::WriteReturn);
                     }
                 }
+            }
+            if let Some(indication) = indication {
+                tx.send(indication)
+                    .await
+                    .map_err(|e| InternalError(e.to_string()))?;
             }
         }
         Ok(())

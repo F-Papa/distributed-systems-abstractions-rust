@@ -75,33 +75,37 @@ where
     T: Send + Sync + Serialize + DeserializeOwned + Clone,
 {
     async fn read(&self) -> Result<(), LinkError> {
-        let mut state = self.state.lock().await;
-        state.request_id += 1;
-        state.acks = 0;
-        state.readlist.clear();
-        state.reading = true;
+        let message = {
+            let mut state = self.state.lock().await;
+            state.request_id += 1;
+            state.acks = 0;
+            state.readlist.clear();
+            state.reading = true;
 
-        let encoded = serde_json::to_value(RegisterMessage::<T>::Read {
-            request_id: state.request_id,
-        })
-        .map_err(|e| InternalError(e.to_string()))?;
-        self.broadcast.broadcast(&encoded).await
+            serde_json::to_value(RegisterMessage::<T>::Read {
+                request_id: state.request_id,
+            })
+            .map_err(|e| InternalError(e.to_string()))?
+        };
+        self.broadcast.broadcast(&message).await
     }
 
     async fn write(&self, value: T) -> Result<(), LinkError> {
-        let mut state = self.state.lock().await;
-        state.request_id += 1;
-        state.write_timestamp += 1;
-        state.acks = 0;
+        let message = {
+            let mut state = self.state.lock().await;
+            state.request_id += 1;
+            state.write_timestamp += 1;
+            state.acks = 0;
 
-        let msg = RegisterMessage::Write {
-            request_id: state.request_id,
-            timestamp: state.write_timestamp,
-            value,
+            let msg = RegisterMessage::Write {
+                request_id: state.request_id,
+                timestamp: state.write_timestamp,
+                value,
+            };
+
+            serde_json::to_value(msg).map_err(|e| InternalError(e.to_string()))?
         };
-
-        let encoded = serde_json::to_value(msg).map_err(|e| InternalError(e.to_string()))?;
-        self.broadcast.broadcast(&encoded).await
+        self.broadcast.broadcast(&message).await
     }
     async fn take_indications(&self) -> Option<mpsc::Receiver<RegisterIndication<T>>> {
         self.indications.lock().await.take()
@@ -171,13 +175,15 @@ where
                     }
                 };
 
-            let mut state = self.state.lock().await;
+            let mut response: Option<Value> = None;
+            let mut indication = None;
             if let RegisterMessage::Value {
                 request_id,
                 ts,
                 value,
             } = message
             {
+                let mut state = self.state.lock().await;
                 if request_id != state.request_id {
                     continue;
                 }
@@ -200,11 +206,11 @@ where
                         timestamp: maxts,
                         value: &readval,
                     };
-                    let encoded =
-                        serde_json::to_value(msg).map_err(|e| InternalError(e.to_string()))?;
-                    self.broadcast.broadcast(&encoded).await?;
+                    response =
+                        Some(serde_json::to_value(msg).map_err(|e| InternalError(e.to_string()))?);
                 }
             } else if let RegisterMessage::Ack { request_id } = message {
+                let mut state = self.state.lock().await;
                 if request_id != state.request_id {
                     continue;
                 }
@@ -212,18 +218,23 @@ where
 
                 if state.acks >= self.majority {
                     state.acks = 0;
-                    let indication: RegisterIndication<T>;
                     if state.reading {
                         state.reading = false;
-                        indication = RegisterIndication::ReadReturn(readval.clone());
+                        indication = Some(RegisterIndication::ReadReturn(readval.clone()));
                     } else {
-                        indication = RegisterIndication::WriteReturn;
+                        indication = Some(RegisterIndication::WriteReturn);
                     }
-
-                    tx.send(indication)
-                        .await
-                        .map_err(|e| InternalError(e.to_string()))?;
                 }
+            }
+
+            if let Some(indication) = indication {
+                tx.send(indication)
+                    .await
+                    .map_err(|e| InternalError(e.to_string()))?;
+            }
+
+            if let Some(r) = response {
+                self.broadcast.broadcast(&r).await?;
             }
         }
         Ok(())
@@ -255,32 +266,37 @@ where
                 }
             };
 
-            let mut state = self.state.lock().await;
+            let mut response: Option<Value> = None;
             if let RegisterMessage::Write {
                 request_id,
                 timestamp,
                 value,
             } = message
             {
+                let mut state = self.state.lock().await;
                 if timestamp > state.timestamp {
                     debug!("write with new timestamp {timestamp} received");
                     state.val = value;
                     state.timestamp = timestamp;
                 }
-                let response = RegisterMessage::<T>::Ack { request_id };
-                let encoded =
-                    serde_json::to_value(response).map_err(|e| InternalError(e.to_string()))?;
-                self.link.send(&encoded, delivery.sender).await?;
+                response = Some(
+                    serde_json::to_value(RegisterMessage::<T>::Ack { request_id })
+                        .map_err(|e| InternalError(e.to_string()))?,
+                );
             } else if let RegisterMessage::Read { request_id } = message {
-                let response = RegisterMessage::Value {
+                let state = self.state.lock().await;
+                let message = RegisterMessage::Value {
                     request_id,
                     ts: state.timestamp,
                     value: &state.val,
                 };
 
-                let encoded =
-                    serde_json::to_value(&response).map_err(|e| InternalError(e.to_string()))?;
-                self.link.send(&encoded, delivery.sender).await?;
+                response =
+                    Some(serde_json::to_value(&message).map_err(|e| InternalError(e.to_string()))?);
+            }
+
+            if let Some(r) = response {
+                self.link.send(&r, delivery.sender).await?;
             }
         }
         Ok(())

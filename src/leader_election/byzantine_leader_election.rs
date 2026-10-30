@@ -70,8 +70,12 @@ impl ByzantineLeaderElection for RotatingElection {
         self.indications.lock().await.take()
     }
     async fn complain(&self) -> Result<(), LinkError> {
-        let mut state = self.state.lock().await;
-        self._complain(&mut state).await
+        let round = {
+            let mut state = self.state.lock().await;
+            state.complained = true;
+            state.round
+        };
+        self._complain(round).await
     }
 }
 
@@ -98,9 +102,8 @@ impl RotatingElection {
         }
     }
 
-    async fn _complain(&self, state: &mut State) -> Result<(), LinkError> {
-        state.complained = true;
-        let complaint = Complaint(state.round);
+    async fn _complain(&self, round: usize) -> Result<(), LinkError> {
+        let complaint = Complaint(round);
         let envelope = Envelope {
             protocol: Protocol::RotatingElection,
             message: complaint,
@@ -144,26 +147,42 @@ impl RotatingElection {
                 "complaint received from node {} for round {}",
                 indication.sender, envelope.message.0
             );
-            let mut state = self.state.lock().await;
-            if state.round != envelope.message.0 || complain_list.contains(&indication.sender) {
-                continue;
+
+            let mut complain_round = None;
+            let indication = {
+                let mut state = self.state.lock().await;
+                if state.round != envelope.message.0 || complain_list.contains(&indication.sender) {
+                    continue;
+                }
+
+                complain_list.insert(indication.sender);
+
+                if complain_list.len() > self.max_faulty_nodes && !state.complained {
+                    debug!("Joining complaints");
+                    state.complained = true;
+                    complain_round = Some(state.round);
+                    None
+                } else if complain_list.len() > 2 * self.max_faulty_nodes {
+                    // len > 2f: the previous condition doesn't guarantee that every node will complain
+                    // (especially if most complainers are byzantine). Once len > 2f, then it will
+                    // eventually propagate.
+                    state.round += 1;
+                    complain_list.clear();
+                    state.complained = false;
+                    let leader = self.round_leader(&state);
+                    Some(Leader { node_id: leader })
+                } else {
+                    None
+                }
+            };
+
+            if let Some(round) = complain_round {
+                self._complain(round).await?;
             }
 
-            complain_list.insert(indication.sender);
-
-            if complain_list.len() > self.max_faulty_nodes && !state.complained {
-                debug!("Joining complaints");
-                self._complain(&mut state).await?;
-            } else if complain_list.len() > 2 * self.max_faulty_nodes {
-                // len > 2f: the previous condition doesn't guarantee that every node will complain
-                // (especially if most complainers are byzantine). Once len > 2f, then it will
-                // eventually propagate.
-                state.round += 1;
-                complain_list.clear();
-                state.complained = false;
-                let leader = self.round_leader(&state);
+            if let Some(indication) = indication {
                 indications_tx
-                    .send(Leader { node_id: leader })
+                    .send(indication)
                     .await
                     .map_err(|e| InternalError(e.to_string()))?;
             }
