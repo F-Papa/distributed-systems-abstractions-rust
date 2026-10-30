@@ -71,19 +71,7 @@ impl ByzantineLeaderElection for RotatingElection {
     }
     async fn complain(&self) -> Result<(), LinkError> {
         let mut state = self.state.lock().await;
-        state.complained = true;
-        let complaint = Complaint(state.round);
-        let envelope = Envelope {
-            protocol: Protocol::RotatingElection,
-            message: complaint,
-        };
-
-        let value = serde_json::to_value(&envelope).map_err(|e| InternalError(e.to_string()))?;
-        for p in self.peers.iter() {
-            self.link.send(&value, *p).await?;
-        }
-
-        Ok(())
+        self._complain(&mut state).await
     }
 }
 
@@ -108,6 +96,22 @@ impl RotatingElection {
             indications: Arc::from(Mutex::from(Some(indications))),
             indications_tx: Mutex::from(Some(indications_tx)),
         }
+    }
+
+    async fn _complain(&self, state: &mut State) -> Result<(), LinkError> {
+        state.complained = true;
+        let complaint = Complaint(state.round);
+        let envelope = Envelope {
+            protocol: Protocol::RotatingElection,
+            message: complaint,
+        };
+
+        let value = serde_json::to_value(&envelope).map_err(|e| InternalError(e.to_string()))?;
+        for p in self.peers.iter() {
+            self.link.send(&value, *p).await?;
+        }
+
+        Ok(())
     }
 
     fn round_leader(&self, state: &State) -> NodeId {
@@ -149,7 +153,7 @@ impl RotatingElection {
 
             if complain_list.len() > self.max_faulty_nodes && !state.complained {
                 debug!("Joining complaints");
-                self.complain().await?;
+                self._complain(&mut state).await?;
             } else if complain_list.len() > 2 * self.max_faulty_nodes {
                 // len > 2f: the previous condition doesn't guarantee that every node will complain
                 // (especially if most complainers are byzantine). Once len > 2f, then it will
