@@ -122,7 +122,10 @@ where
         )?;
         Ok(())
     }
-    async fn stop(&self) {}
+    async fn stop(&self) {
+        self.broadcast.close().await;
+        self.link.close().await;
+    }
 }
 
 impl<T> WriteOneReadManyAtomic<T>
