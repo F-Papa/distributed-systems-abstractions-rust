@@ -18,9 +18,9 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    common::ShutdownHandler,
+    common::{ShutdownHandler, marshal, unmarshal},
     links::{
-        LinkError::{self, InternalError, MessageError},
+        LinkError::{self, MessageError},
         NodeId,
         auth_perfect_link::{AplDeliver, AuthenticatedPerfectLink, bytes_to_sign},
         fair_loss_link::FairLossLink,
@@ -109,7 +109,7 @@ impl SignAndAcknowledge {
             payload,
             signature: &signature[..],
         };
-        let encoded = serde_json::to_value(envelope).map_err(|e| MessageError(e.to_string()))?;
+        let encoded = marshal(envelope)?;
         Ok((id, encoded))
     }
 
@@ -190,10 +190,10 @@ impl SignAndAcknowledge {
 
         while let Some(fll_deliver) = fll_indications.recv().await {
             let envelope: Envelope<ProtocolMessage<Value>, Vec<u8>> =
-                match serde_json::from_value(fll_deliver.message) {
+                match unmarshal(fll_deliver.message) {
                     Ok(envelope) => envelope,
                     Err(e) => {
-                        debug!("Invalid message from {}: {}", fll_deliver.sender, e);
+                        debug!("Invalid message from {}: {:?}", fll_deliver.sender, e);
                         continue;
                     }
                 };
@@ -219,7 +219,7 @@ impl SignAndAcknowledge {
                         message: payload,
                     })
                     .await
-                    .map_err(|e| InternalError(e.to_string()))?;
+                    .map_err(LinkError::with_action("send indication"))?;
 
                 received_keys.insert(dedup_key);
             }

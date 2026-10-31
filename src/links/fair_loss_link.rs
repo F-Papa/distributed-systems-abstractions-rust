@@ -210,7 +210,7 @@ impl FairLossLink {
                 .expect("get indications_tx")
                 .send(indication)
                 .await
-                .map_err(|e| LinkError::InternalError(e.to_string()))?;
+                .map_err(LinkError::with_action("send indication"))?;
         }
 
         *indications_tx = None;

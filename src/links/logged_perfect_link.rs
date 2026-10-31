@@ -1,3 +1,5 @@
+use crate::common::{marshal, unmarshal};
+
 use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
@@ -13,8 +15,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::links::{
-    LinkError::{self, InternalError},
-    NodeId,
+    LinkError, NodeId,
     perfect_link::{PerfectLink, PlDeliver},
 };
 
@@ -82,13 +83,14 @@ impl CommitAndAcknowledge {
 
         let mut file = fs::File::open(&self.log_filepath)
             .await
-            .map_err(|e| InternalError(e.to_string()))?;
+            .map_err(LinkError::with_action("open delivery log"))?;
 
         let mut content = String::new();
         file.read_to_string(&mut content)
             .await
-            .map_err(|e| InternalError(e.to_string()))?;
-        let delivered = serde_json::from_str(&content).map_err(|e| InternalError(e.to_string()))?;
+            .map_err(LinkError::with_action("read delivery log"))?;
+        let delivered = serde_json::from_str(&content)
+            .map_err(LinkError::with_action("decode delivery log"))?;
         Ok(delivered)
     }
 
@@ -98,22 +100,23 @@ impl CommitAndAcknowledge {
         {
             create_dir_all(parent_dir)
                 .await
-                .map_err(|e| InternalError(e.to_string()))?;
+                .map_err(LinkError::with_action("create delivery log directory"))?;
         }
 
-        let content = serde_json::to_string(delivered).map_err(|e| InternalError(e.to_string()))?;
+        let content = serde_json::to_string(delivered)
+            .map_err(LinkError::with_action("encode delivery log"))?;
         let tmp_filepath = (self.log_filepath.to_string_lossy() + ".tmp").to_string();
         let mut file = fs::File::create(&tmp_filepath)
             .await
-            .map_err(|e| InternalError(e.to_string()))?;
+            .map_err(LinkError::with_action("create temporary delivery log"))?;
 
         file.write_all(content.as_bytes())
             .await
-            .map_err(|e| InternalError(e.to_string()))?;
+            .map_err(LinkError::with_action("write delivery log"))?;
 
         rename(tmp_filepath, &self.log_filepath)
             .await
-            .map_err(|e| InternalError(e.to_string()))?;
+            .map_err(LinkError::with_action("persist delivery log"))?;
         Ok(())
     }
 
@@ -128,14 +131,13 @@ impl CommitAndAcknowledge {
 
         if let Some(mut pl_indications) = self.perfect_link.take_indications().await.take() {
             while let Some(pl_delivery) = pl_indications.recv().await {
-                let envelope: WireEnvelope<Value> =
-                    match serde_json::from_value(pl_delivery.message) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            debug!("could not deserialize envelope: {}", e);
-                            continue;
-                        }
-                    };
+                let envelope: WireEnvelope<Value> = match unmarshal(pl_delivery.message) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        debug!("could not deserialize envelope: {:?}", e);
+                        continue;
+                    }
+                };
 
                 let envelope = envelope.envelope;
                 let is_dup = delivered.iter().find(|d| d.id == envelope.id).is_some();
@@ -154,7 +156,7 @@ impl CommitAndAcknowledge {
                         .collect(),
                 })
                 .await
-                .map_err(|e| InternalError(e.to_string()))?;
+                .map_err(LinkError::with_action("send indication"))?;
                 self.store(&delivered).await?;
             }
         }
@@ -173,11 +175,10 @@ where
             payload,
         };
 
-        let value = serde_json::to_value(WireEnvelope {
+        let value = marshal(WireEnvelope {
             protocol: Protocol::CommitAndAcknowledge,
             envelope,
-        })
-        .map_err(|e| InternalError(e.to_string()))?;
+        })?;
         self.perfect_link.send(&value, recipient).await
     }
     async fn listen(&self) -> Result<(), LinkError> {

@@ -5,12 +5,10 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     common::NodeId,
-    failure_detector::{
-        eventually_perfect_failure_detector::{
-            EpfdMessageIndication, EventuallyPerfectFailureDetector,
-        },
+    failure_detector::eventually_perfect_failure_detector::{
+        EpfdMessageIndication, EventuallyPerfectFailureDetector,
     },
-    leader_election::{Leader},
+    leader_election::Leader,
     links::LinkError::{self, InternalError},
 };
 
@@ -55,7 +53,7 @@ impl MonarchicalEventualLeaderElector {
                     node_id: new_leader,
                 })
                 .await
-                .map_err(|e| InternalError(e.to_string()))?;
+                .map_err(LinkError::with_action("send indication"))?;
         }
         Ok(new_leader)
     }
@@ -93,7 +91,8 @@ impl MonarchicalEventualLeaderElector {
             .nodes
             .iter()
             .filter(|id| !suspected.contains(id))
-            .reduce(|a, b| if a.get() > b.get() { a } else { b }).copied();
+            .reduce(|a, b| if a.get() > b.get() { a } else { b })
+            .copied();
 
         match highest_id {
             Some(id) => Ok(id),

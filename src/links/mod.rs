@@ -1,6 +1,6 @@
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
-use crate::common::NodeId;
+use crate::{common::NodeId, links::LinkError::InternalError};
 
 pub mod auth_perfect_link;
 pub mod fair_loss_link;
@@ -16,6 +16,22 @@ pub enum LinkError {
     MessageError(String),
     InternalError(String),
     LinkClosed(),
+}
+
+impl LinkError {
+    pub fn from_error<E>(e: E) -> Self
+    where
+        E: std::error::Error,
+    {
+        InternalError(e.to_string())
+    }
+
+    pub fn with_action<E>(action: &str) -> impl Fn(E) -> Self
+    where
+        E: std::error::Error,
+    {
+        move |e: E| InternalError(format!("action:{}, error: {}", action, e.to_string()))
+    }
 }
 
 pub fn signals() -> (Signal, Signal) {

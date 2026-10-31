@@ -14,14 +14,11 @@ use tokio::{
 };
 
 use crate::{
-    common::{NodeId, ShutdownHandler},
+    common::{NodeId, ShutdownHandler, marshal, unmarshal},
     links::{LinkError, perfect_link::PerfectLink},
 };
 
-use crate::{
-    failure_detector::perfect_failure_detector::PfdMessage::{HeartReply, HeartbeatRequest},
-    links::LinkError::MessageError,
-};
+use crate::failure_detector::perfect_failure_detector::PfdMessage::{HeartReply, HeartbeatRequest};
 
 #[async_trait]
 pub trait PerfectFailureDetector: Sync + Send {
@@ -117,9 +114,7 @@ impl ExcludeOnTimeout {
             })?;
 
         while let Some(deliver) = indications.recv().await {
-            match serde_json::from_value::<Heartbeat>(deliver.message)
-                .map(|heartbeat| heartbeat.message)
-            {
+            match unmarshal::<Heartbeat>(deliver.message).map(|heartbeat| heartbeat.message) {
                 Err(_) => continue,
                 Ok(HeartReply) => {
                     debug!("{:?} from {}", HeartReply, deliver.sender);
@@ -128,8 +123,7 @@ impl ExcludeOnTimeout {
                 Ok(HeartbeatRequest) => {
                     debug!("{:?} from {}", HeartbeatRequest, deliver.sender);
 
-                    let payload = serde_json::to_value(Heartbeat::new(PfdMessage::HeartReply))
-                        .map_err(|e| MessageError(e.to_string()))?;
+                    let payload = marshal(Heartbeat::new(PfdMessage::HeartReply))?;
 
                     self.perfect_link.send(&payload, deliver.sender).await?;
                     debug!("{:?} sent to {}", HeartReply, deliver.sender);
@@ -169,7 +163,7 @@ impl ExcludeOnTimeout {
                     };
                 }
 
-                let payload = match serde_json::to_value(Heartbeat::new(HeartbeatRequest)) {
+                let payload = match marshal(Heartbeat::new(HeartbeatRequest)) {
                     Ok(p) => p,
                     Err(e) => {
                         debug!("Error encoding HeartbeatRequest: {:?}", e);

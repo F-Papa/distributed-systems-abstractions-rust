@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use crate::{
     broadcast::best_effort::{BeDeliver, BestEffortBroadcast},
-    common::NodeId,
-    links::LinkError::{self, InternalError},
+    common::{NodeId, marshal, unmarshal},
+    links::LinkError,
 };
 
 pub type UbDeliver = BeDeliver;
@@ -60,7 +60,7 @@ where
             payload,
         };
 
-        let value = serde_json::to_value(&envelope).map_err(|e| InternalError(e.to_string()))?;
+        let value = marshal(&envelope)?;
         self.best_effort_broadcast.broadcast(&value).await
     }
 
@@ -107,7 +107,7 @@ impl MajorityAckBroadcast {
         inbox: &mut HashMap<Uuid, PendingDelivery>,
         indications_tx: &mpsc::Sender<UbDeliver>,
     ) -> Result<(), LinkError> {
-        let envelope: Envelope<Value> = match serde_json::from_value(delivery.message.clone()) {
+        let envelope: Envelope<Value> = match unmarshal(delivery.message.clone()) {
             Ok(e) => e,
             Err(e) => {
                 debug!("error deserializing envelope: {:?}", e);
@@ -145,7 +145,7 @@ impl MajorityAckBroadcast {
             indications_tx
                 .send(indication)
                 .await
-                .map_err(|e| InternalError(e.to_string()))?;
+                .map_err(LinkError::with_action("send indication"))?;
 
             message.delivered = true;
         }

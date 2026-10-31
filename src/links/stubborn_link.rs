@@ -13,9 +13,9 @@ use tokio::{
 };
 
 use crate::{
-    common::{NodeId, ShutdownHandler},
+    common::{NodeId, ShutdownHandler, marshal, unmarshal},
     links::{
-        LinkError::{self, InternalError},
+        LinkError,
         fair_loss_link::{FairLossLink, FllDeliver},
     },
 };
@@ -62,11 +62,10 @@ where
     T: Sync + Serialize,
 {
     async fn send<'a>(&'a self, payload: &'a T, recipient: NodeId) -> Result<(), LinkError> {
-        let payload = serde_json::to_value(Envelope {
+        let payload = marshal(Envelope {
             protocol: Protocol::RetransmitForever,
             payload,
-        })
-        .map_err(|e| LinkError::MessageError(e.to_string()))?;
+        })?;
         self.fair_loss_link.send(&payload, recipient).await?;
         self.outbox
             .lock()
@@ -150,7 +149,7 @@ impl RetransmitForever {
         while let (Some(fll_indication), Some(tx)) =
             (fll_indications.recv().await, indications_tx.as_ref())
         {
-            let envelope: Envelope<Value> = match serde_json::from_value(fll_indication.message) {
+            let envelope: Envelope<Value> = match unmarshal(fll_indication.message) {
                 Ok(envelope) => envelope,
                 Err(_) => continue,
             };
@@ -159,7 +158,7 @@ impl RetransmitForever {
                 sender: fll_indication.sender,
             })
             .await
-            .map_err(|e| InternalError(e.to_string()))?;
+            .map_err(LinkError::with_action("send indication"))?;
         }
         Ok(())
     }

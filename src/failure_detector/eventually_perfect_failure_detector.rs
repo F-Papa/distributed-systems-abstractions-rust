@@ -14,11 +14,9 @@ use tokio::{
 };
 
 use crate::{
-    common::{NodeId, ShutdownHandler},
+    common::{NodeId, ShutdownHandler, marshal, unmarshal},
     links::{LinkError, perfect_link::PerfectLink},
 };
-
-use crate::links::LinkError::MessageError;
 
 #[async_trait]
 pub trait EventuallyPerfectFailureDetector: Sync + Send {
@@ -118,9 +116,7 @@ impl IncreasingTimeout {
             })?;
 
         while let Some(deliver) = indications.recv().await {
-            match serde_json::from_value::<Heartbeat>(deliver.message)
-                .map(|heartbeat| heartbeat.message)
-            {
+            match unmarshal::<Heartbeat>(deliver.message).map(|heartbeat| heartbeat.message) {
                 Err(_) => continue,
                 Ok(EpfdMessage::HeartReply) => {
                     debug!("{:?} from {}", EpfdMessage::HeartReply, deliver.sender);
@@ -133,8 +129,7 @@ impl IncreasingTimeout {
                         deliver.sender
                     );
 
-                    let payload = serde_json::to_value(Heartbeat::new(EpfdMessage::HeartReply))
-                        .map_err(|e| MessageError(e.to_string()))?;
+                    let payload = marshal(Heartbeat::new(EpfdMessage::HeartReply))?;
 
                     self.perfect_link.send(&payload, deliver.sender).await?;
                     debug!("{:?} sent to {}", EpfdMessage::HeartReply, deliver.sender);
@@ -185,14 +180,13 @@ impl IncreasingTimeout {
                     }
                 }
 
-                let payload =
-                    match serde_json::to_value(Heartbeat::new(EpfdMessage::HeartbeatRequest)) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            debug!("Error encoding HeartbeatRequest: {:?}", e);
-                            continue;
-                        }
-                    };
+                let payload = match marshal(Heartbeat::new(EpfdMessage::HeartbeatRequest)) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        debug!("Error encoding HeartbeatRequest: {:?}", e);
+                        continue;
+                    }
+                };
 
                 self.perfect_link.send(&payload, *p).await?;
                 debug!("{:?} sent to {}", EpfdMessage::HeartbeatRequest, p);

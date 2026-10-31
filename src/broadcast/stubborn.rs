@@ -16,11 +16,7 @@ use uuid::Uuid;
 use crate::{
     broadcast::best_effort::{BeDeliver, BestEffortBroadcast},
     common::NodeId,
-    links::{
-        LinkError::{self, InternalError},
-        fair_loss_link::FairLossLink,
-        stubborn_link::StubbornLink,
-    },
+    links::{LinkError, fair_loss_link::FairLossLink, stubborn_link::StubbornLink},
 };
 pub type SbDeliver = BeDeliver;
 
@@ -96,7 +92,7 @@ where
             indications_tx
                 .send(i)
                 .await
-                .map_err(|e| InternalError(e.to_string()))?;
+                .map_err(LinkError::with_action("receive indication"))?;
         }
 
         Ok(())

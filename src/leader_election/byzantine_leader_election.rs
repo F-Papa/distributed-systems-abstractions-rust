@@ -7,10 +7,10 @@ use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::{
-    common::NodeId,
+    common::{NodeId, marshal, unmarshal},
     leader_election::Leader,
     links::{
-        LinkError::{self, InternalError, LinkClosed},
+        LinkError::{self, LinkClosed},
         auth_perfect_link::AuthenticatedPerfectLink,
     },
 };
@@ -109,7 +109,7 @@ impl RotatingElection {
             message: complaint,
         };
 
-        let value = serde_json::to_value(&envelope).map_err(|e| InternalError(e.to_string()))?;
+        let value = marshal(&envelope)?;
         for p in self.peers.iter() {
             self.link.send(&value, *p).await?;
         }
@@ -135,10 +135,10 @@ impl RotatingElection {
 
         let mut complain_list: HashSet<NodeId> = HashSet::new();
         while let Some(indication) = link_indications.recv().await {
-            let envelope: Envelope = match serde_json::from_value(indication.message) {
+            let envelope: Envelope = match unmarshal(indication.message) {
                 Ok(c) => c,
                 Err(e) => {
-                    debug!("could not deserialize complaint: {}", e);
+                    debug!("could not deserialize complaint: {:?}", e);
                     continue;
                 }
             };
@@ -184,7 +184,7 @@ impl RotatingElection {
                 indications_tx
                     .send(indication)
                     .await
-                    .map_err(|e| InternalError(e.to_string()))?;
+                    .map_err(LinkError::with_action("send indication"))?;
             }
         }
 

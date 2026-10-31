@@ -20,11 +20,9 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    common::ShutdownHandler,
+    common::{ShutdownHandler, marshal, unmarshal},
     links::{
-        self,
-        LinkError::{self, InternalError, MessageError},
-        NodeId,
+        self, LinkError, NodeId,
         fair_loss_link::FairLossLink,
         perfect_link::{PerfectLink, PlDeliver},
     },
@@ -96,7 +94,7 @@ impl AcknowledgeMessages {
             protocol: Protocol::AcknowledgeMessages,
             id,
         };
-        let encoded = serde_json::to_value(&ack).map_err(|e| MessageError(e.to_string()))?;
+        let encoded = marshal(&ack)?;
         self.fair_loss_link.send(&encoded, to).await
     }
 
@@ -129,11 +127,10 @@ impl AcknowledgeMessages {
         let mut received_keys = self.inbox.lock().await;
 
         while let Some(fll_deliver) = fll_indications.recv().await {
-            let message: ProtocolMessage<Value> = match serde_json::from_value(fll_deliver.message)
-            {
+            let message: ProtocolMessage<Value> = match unmarshal(fll_deliver.message) {
                 Ok(e) => e,
                 Err(e) => {
-                    debug!("Invalid message from {}: {}", fll_deliver.sender, e);
+                    debug!("Invalid message from {}: {:?}", fll_deliver.sender, e);
                     continue;
                 }
             };
@@ -153,7 +150,7 @@ impl AcknowledgeMessages {
                     message: envelope.payload,
                 })
                 .await
-                .map_err(|e| InternalError(e.to_string()))?;
+                .map_err(LinkError::with_action("send indication"))?;
 
             received_keys.insert(dedup_key);
             self.ack(fll_deliver.sender, envelope.id).await?;
@@ -177,8 +174,7 @@ where
         };
 
         let key = (recipient, envelope.id);
-        let encoded_message = serde_json::to_value(ProtocolMessage::Data { envelope })
-            .map_err(|e| MessageError(e.to_string()))?;
+        let encoded_message = marshal(ProtocolMessage::Data { envelope })?;
 
         let encoded_message = Arc::from(encoded_message);
 

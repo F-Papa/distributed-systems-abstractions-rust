@@ -1,3 +1,5 @@
+use crate::common::{marshal, unmarshal};
+
 use async_trait::async_trait;
 
 use log::debug;
@@ -7,7 +9,6 @@ use std::{collections::HashSet, sync::Arc};
 use tokio::sync::{Mutex, mpsc};
 use uuid::{self, Uuid};
 
-use crate::links::LinkError::MessageError;
 use crate::links::perfect_link::{PerfectLink, PlDeliver};
 use crate::links::stubborn_link::StubbornLink;
 use crate::links::{LinkError, NodeId};
@@ -43,7 +44,7 @@ where
             payload,
         };
 
-        let bytes = serde_json::to_value(&envelope).map_err(|e| MessageError(e.to_string()))?;
+        let bytes = marshal(&envelope)?;
         self.stubborn_link.send(&bytes, recipient).await
     }
 
@@ -89,9 +90,9 @@ impl EliminateDuplicates {
                 Some(sbl_deliver) => sbl_deliver,
             };
 
-            let envelope: Envelope<Value> = match serde_json::from_value(sbl_deliver.message) {
+            let envelope: Envelope<Value> = match unmarshal(sbl_deliver.message) {
                 Err(e) => {
-                    debug!("invalid message ({e})");
+                    debug!("invalid message ({e:?})");
                     continue;
                 }
                 Ok(e) => e,

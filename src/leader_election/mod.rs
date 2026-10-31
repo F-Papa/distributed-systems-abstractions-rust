@@ -68,7 +68,7 @@ impl MonarchicalLeaderElection {
                     node_id: new_leader,
                 })
                 .await
-                .map_err(|e| InternalError(e.to_string()))?;
+                .map_err(LinkError::with_action("send indication"))?;
         }
         Ok(new_leader)
     }

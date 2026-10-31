@@ -12,11 +12,7 @@ use tokio::{
     sync::{Mutex, mpsc},
 };
 
-use crate::{
-    common::NodeId,
-    links::LinkError::{self, InternalError},
-    registers::RegisterIndication,
-};
+use crate::{common::NodeId, links::LinkError, registers::RegisterIndication};
 
 #[async_trait]
 pub trait LoggedRegularRegister<T>: Send + Sync
@@ -75,23 +71,24 @@ where
         {
             create_dir_all(parent_dir)
                 .await
-                .map_err(|e| InternalError(e.to_string()))?;
+                .map_err(LinkError::with_action("create register log directory"))?;
         }
 
         let tmp_filepath = (self.filepath.to_string_lossy() + ".tmp").to_string();
         let mut file = fs::File::create(&tmp_filepath)
             .await
-            .map_err(|e| InternalError(e.to_string()))?;
+            .map_err(LinkError::with_action("create temporary register log"))?;
 
-        let encoded = serde_json::to_string(state).map_err(|e| InternalError(e.to_string()))?;
+        let encoded =
+            serde_json::to_string(state).map_err(LinkError::with_action("encode register log"))?;
 
         file.write_all(encoded.as_bytes())
             .await
-            .map_err(|e| InternalError(e.to_string()))?;
+            .map_err(LinkError::with_action("write register log"))?;
 
         rename(tmp_filepath, &self.filepath)
             .await
-            .map_err(|e| InternalError(e.to_string()))
+            .map_err(LinkError::with_action("persist register log"))
     }
 
     async fn retrieve(&self) -> Result<State<T>, LinkError> {
@@ -100,16 +97,16 @@ where
         }
         let mut file = fs::File::open(&self.filepath)
             .await
-            .map_err(|e| InternalError(e.to_string()))?;
+            .map_err(LinkError::with_action("open register log"))?;
         // match
 
         let mut encoded = String::new();
         file.read_to_string(&mut encoded)
             .await
-            .map_err(|e| InternalError(e.to_string()))?;
+            .map_err(LinkError::with_action("read register log"))?;
 
-        let state: State<T> =
-            serde_json::from_str(&encoded).map_err(|e| InternalError(e.to_string()))?;
+        let state: State<T> = serde_json::from_str(&encoded)
+            .map_err(LinkError::with_action("decode register log"))?;
 
         Ok(state)
     }

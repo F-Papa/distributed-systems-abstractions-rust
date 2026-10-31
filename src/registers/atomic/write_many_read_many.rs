@@ -8,11 +8,8 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     broadcast::best_effort::BestEffortBroadcast,
-    common::NodeId,
-    links::{
-        LinkError::{self, InternalError},
-        perfect_link::PerfectLink,
-    },
+    common::{NodeId, marshal, unmarshal},
+    links::{LinkError, perfect_link::PerfectLink},
     registers::RegisterIndication,
 };
 
@@ -137,7 +134,7 @@ where
                     (state.value, state.timestamp, state.write_rank) = (value, ts, write_rank);
                 }
                 let response = RegisterMessage::<T>::Ack { request_id };
-                serde_json::to_value(response).map_err(|e| InternalError(e.to_string()))?
+                marshal(response)?
             };
 
             self.link.send(&response, sender).await?;
@@ -160,7 +157,7 @@ where
                     value: &state.value,
                 };
 
-                serde_json::to_value(&response).map_err(|e| InternalError(e.to_string()))?
+                marshal(&response)?
             };
 
             self.link.send(&response, sender).await?;
@@ -194,7 +191,7 @@ where
             if let Some(indication) = indication {
                 tx.send(indication)
                     .await
-                    .map_err(|e| InternalError(e.to_string()))?;
+                    .map_err(LinkError::with_action("send indication"))?;
             }
         }
         Ok(())
@@ -240,8 +237,7 @@ where
                             value: &state.writeval,
                         };
                     }
-                    message =
-                        Some(serde_json::to_value(msg).map_err(|e| InternalError(e.to_string()))?);
+                    message = Some(marshal(msg)?);
                 }
             }
 
@@ -264,15 +260,14 @@ where
         };
 
         while let Some(delivery) = indications.recv().await {
-            let message: RegisterMessage<Option<T>> =
-                match serde_json::from_value(delivery.message.clone()) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        debug!("error deserializing link envelope: {e}");
-                        debug!("message: {:?}", delivery.message);
-                        continue;
-                    }
-                };
+            let message: RegisterMessage<Option<T>> = match unmarshal(delivery.message.clone()) {
+                Ok(m) => m,
+                Err(e) => {
+                    debug!("error deserializing link envelope: {e:?}");
+                    debug!("message: {:?}", delivery.message);
+                    continue;
+                }
+            };
 
             if matches!(message, RegisterMessage::Ack { .. }) {
                 self.handle_ack(message, &tx).await?;
@@ -290,11 +285,10 @@ where
         };
 
         while let Some(delivery) = indications.recv().await {
-            let message: RegisterMessage<Option<T>> = match serde_json::from_value(delivery.message)
-            {
+            let message: RegisterMessage<Option<T>> = match unmarshal(delivery.message) {
                 Ok(m) => m,
                 Err(e) => {
-                    debug!("error deserializing broadcast envelope: {e}");
+                    debug!("error deserializing broadcast envelope: {e:?}");
                     continue;
                 }
             };
@@ -322,10 +316,9 @@ where
             state.readlist.clear();
             state.reading = true;
 
-            serde_json::to_value(RegisterMessage::<T>::Read {
+            marshal(RegisterMessage::<T>::Read {
                 request_id: state.request_id,
-            })
-            .map_err(|e| InternalError(e.to_string()))?
+            })?
         };
 
         self.broadcast.broadcast(&response).await
@@ -339,10 +332,9 @@ where
             state.acks = 0;
             state.readlist.clear();
 
-            serde_json::to_value(RegisterMessage::<T>::Read {
+            marshal(RegisterMessage::<T>::Read {
                 request_id: state.request_id,
-            })
-            .map_err(|e| InternalError(e.to_string()))?
+            })?
         };
         self.broadcast.broadcast(&response).await
     }

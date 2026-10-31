@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use log::debug;
@@ -15,11 +12,8 @@ use uuid::Uuid;
 
 use crate::{
     broadcast::best_effort::{BeDeliver, BestEffortBroadcast},
-    common::NodeId,
-    links::
-        LinkError::{self, InternalError}
-        
-    ,
+    common::{NodeId, marshal, unmarshal},
+    links::LinkError,
 };
 
 pub type RbDeliver = BeDeliver;
@@ -73,7 +67,7 @@ impl EagerReliableBroadcast {
         };
 
         while let Some(i) = link_indications.recv().await {
-            let envelope: Envelope<Value> = match serde_json::from_value(i.message.clone()) {
+            let envelope: Envelope<Value> = match unmarshal(i.message.clone()) {
                 Ok(e) => e,
                 Err(e) => {
                     debug!("error deserializing envelope: {:?}", e);
@@ -98,7 +92,7 @@ impl EagerReliableBroadcast {
             indications_tx
                 .send(delivery)
                 .await
-                .map_err(|e| InternalError(e.to_string()))?;
+                .map_err(LinkError::with_action("send indication"))?;
 
             self.best_effort_broadcast.broadcast(&i.message).await?;
         }
@@ -122,7 +116,7 @@ where
             original_sender: self.local_id,
         };
 
-        let value = serde_json::to_value(&envelope).map_err(|e| InternalError(e.to_string()))?;
+        let value = marshal(&envelope)?;
         self.best_effort_broadcast.broadcast(&value).await
     }
 

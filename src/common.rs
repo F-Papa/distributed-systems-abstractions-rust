@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc, watch};
 
-use crate::links::LinkError::{self, InternalError};
+use crate::links::LinkError;
 
 pub struct ShutdownHandler {
     sender: watch::Sender<bool>,
@@ -40,12 +40,18 @@ impl ShutdownHandler {
     }
 }
 
-pub fn marshal<T>(value: T) -> Result<Value, LinkError> where T: Serialize{
-        serde_json::to_value(value).map_err(|e| InternalError(format!("Failed to marshal value: {}", e.to_string())))
+pub fn marshal<T>(value: T) -> Result<Value, LinkError>
+where
+    T: Serialize,
+{
+    serde_json::to_value(value).map_err(LinkError::with_action("marshal"))
 }
 
-pub fn unmarshal<T>(value: Value) -> Result<T, LinkError> where T: DeserializeOwned {
-    serde_json::from_value(value).map_err(|e| InternalError(format!("Failed to unmarshal value: {}", e.to_string())))
+pub fn unmarshal<T>(value: Value) -> Result<T, LinkError>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(value).map_err(LinkError::with_action("unmarshal"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

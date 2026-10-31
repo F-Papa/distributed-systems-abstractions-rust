@@ -7,11 +7,8 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     broadcast::best_effort::BestEffortBroadcast,
-    common::NodeId,
-    links::{
-        LinkError::{self, InternalError},
-        perfect_link::PerfectLink,
-    },
+    common::{NodeId, marshal, unmarshal},
+    links::{LinkError, perfect_link::PerfectLink},
     registers::RegisterIndication,
 };
 
@@ -82,10 +79,9 @@ where
             state.readlist.clear();
             state.reading = true;
 
-            serde_json::to_value(RegisterMessage::<T>::Read {
+            marshal(RegisterMessage::<T>::Read {
                 request_id: state.request_id,
-            })
-            .map_err(|e| InternalError(e.to_string()))?
+            })?
         };
         self.broadcast.broadcast(&message).await
     }
@@ -103,7 +99,7 @@ where
                 value,
             };
 
-            serde_json::to_value(msg).map_err(|e| InternalError(e.to_string()))?
+            marshal(msg)?
         };
         self.broadcast.broadcast(&message).await
     }
@@ -165,15 +161,14 @@ where
         };
 
         while let Some(delivery) = indications.recv().await {
-            let message: RegisterMessage<Option<T>> =
-                match serde_json::from_value(delivery.message.clone()) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        debug!("error deserializing link envelope: {e}");
-                        debug!("message: {:?}", delivery.message);
-                        continue;
-                    }
-                };
+            let message: RegisterMessage<Option<T>> = match unmarshal(delivery.message.clone()) {
+                Ok(m) => m,
+                Err(e) => {
+                    debug!("error deserializing link envelope: {e:?}");
+                    debug!("message: {:?}", delivery.message);
+                    continue;
+                }
+            };
 
             let mut response: Option<Value> = None;
             let mut indication = None;
@@ -206,8 +201,7 @@ where
                         timestamp: maxts,
                         value: &readval,
                     };
-                    response =
-                        Some(serde_json::to_value(msg).map_err(|e| InternalError(e.to_string()))?);
+                    response = Some(marshal(msg)?);
                 }
             } else if let RegisterMessage::Ack { request_id } = message {
                 let mut state = self.state.lock().await;
@@ -230,7 +224,7 @@ where
             if let Some(indication) = indication {
                 tx.send(indication)
                     .await
-                    .map_err(|e| InternalError(e.to_string()))?;
+                    .map_err(LinkError::with_action("send indication"))?;
             }
 
             if let Some(r) = response {
@@ -257,11 +251,10 @@ where
         };
 
         while let Some(delivery) = indications.recv().await {
-            let message: RegisterMessage<Option<T>> = match serde_json::from_value(delivery.message)
-            {
+            let message: RegisterMessage<Option<T>> = match unmarshal(delivery.message) {
                 Ok(m) => m,
                 Err(e) => {
-                    debug!("error deserializing broadcast envelope: {e}");
+                    debug!("error deserializing broadcast envelope: {e:?}");
                     continue;
                 }
             };
@@ -279,10 +272,7 @@ where
                     state.val = value;
                     state.timestamp = timestamp;
                 }
-                response = Some(
-                    serde_json::to_value(RegisterMessage::<T>::Ack { request_id })
-                        .map_err(|e| InternalError(e.to_string()))?,
-                );
+                response = Some(marshal(RegisterMessage::<T>::Ack { request_id })?);
             } else if let RegisterMessage::Read { request_id } = message {
                 let state = self.state.lock().await;
                 let message = RegisterMessage::Value {
@@ -291,8 +281,7 @@ where
                     value: &state.val,
                 };
 
-                response =
-                    Some(serde_json::to_value(&message).map_err(|e| InternalError(e.to_string()))?);
+                response = Some(marshal(&message)?);
             }
 
             if let Some(r) = response {

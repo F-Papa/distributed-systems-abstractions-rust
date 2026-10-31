@@ -8,11 +8,8 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     broadcast::best_effort::BestEffortBroadcast,
-    common::NodeId,
-    links::{
-        LinkError::{self, InternalError},
-        perfect_link::PerfectLink,
-    },
+    common::{NodeId, marshal, unmarshal},
+    links::{LinkError, perfect_link::PerfectLink},
     registers::RegisterIndication,
 };
 
@@ -89,7 +86,7 @@ where
             let message: RegisterMessage<T> = RegisterMessage::Read {
                 request_id: state.request_id,
             };
-            serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?
+            marshal(message)?
         };
         self.broadcast.broadcast(&message).await
     }
@@ -105,7 +102,7 @@ where
                 timestamp: state.write_timestamp,
                 value,
             };
-            serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?
+            marshal(message)?
         };
         self.broadcast.broadcast(&message).await
     }
@@ -145,11 +142,10 @@ where
         };
 
         while let Some(delivery) = indications.recv().await {
-            let message: RegisterMessage<Option<T>> = match serde_json::from_value(delivery.message)
-            {
+            let message: RegisterMessage<Option<T>> = match unmarshal(delivery.message) {
                 Ok(m) => m,
                 Err(e) => {
-                    debug!("error deserializing broadcast envelope: {e}");
+                    debug!("error deserializing broadcast envelope: {e:?}");
                     continue;
                 }
             };
@@ -161,10 +157,7 @@ where
                 if timestamp > state.timestamp {
                     state.val = value;
                     state.timestamp = timestamp;
-                    response = Some(
-                        serde_json::to_value(RegisterMessage::<T>::Ack { timestamp })
-                            .map_err(|e| InternalError(e.to_string()))?,
-                    );
+                    response = Some(marshal(RegisterMessage::<T>::Ack { timestamp })?);
                 }
             } else if let RegisterMessage::Read { request_id } = message {
                 let state = self.state.lock().await;
@@ -174,8 +167,7 @@ where
                     value: &state.val,
                 };
 
-                response =
-                    Some(serde_json::to_value(message).map_err(|e| InternalError(e.to_string()))?);
+                response = Some(marshal(message)?);
             };
 
             if let Some(r) = response {
@@ -198,15 +190,14 @@ where
         };
 
         while let Some(delivery) = indications.recv().await {
-            let message: RegisterMessage<Option<T>> =
-                match serde_json::from_value(delivery.message.clone()) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        debug!("error deserializing link envelope: {e}");
-                        debug!("message: {:?}", delivery.message);
-                        continue;
-                    }
-                };
+            let message: RegisterMessage<Option<T>> = match unmarshal(delivery.message.clone()) {
+                Ok(m) => m,
+                Err(e) => {
+                    debug!("error deserializing link envelope: {e:?}");
+                    debug!("message: {:?}", delivery.message);
+                    continue;
+                }
+            };
 
             let mut indication = None;
             if let RegisterMessage::Value {
@@ -247,7 +238,7 @@ where
             if let Some(indication) = indication {
                 tx.send(indication)
                     .await
-                    .map_err(|e| InternalError(e.to_string()))?;
+                    .map_err(LinkError::with_action("send indication"))?;
             }
         }
         Ok(())

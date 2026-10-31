@@ -10,7 +10,7 @@ use tokio::{
 use crate::{
     common::NodeId,
     links::{
-        LinkError::{self, InternalError},
+        LinkError,
         perfect_link::{PerfectLink, PlDeliver},
     },
 };
@@ -93,7 +93,7 @@ where
             indications_tx
                 .send(i)
                 .await
-                .map_err(|e| InternalError(e.to_string()))?;
+                .map_err(LinkError::with_action("send indication"))?;
         }
 
         Ok(())

@@ -1,3 +1,5 @@
+use crate::common::{marshal, unmarshal};
+
 use async_trait::async_trait;
 
 use ed25519_dalek::{self, Signature, Signer, Verifier, VerifyingKey};
@@ -34,7 +36,7 @@ where
             payload,
         };
 
-        let value = serde_json::to_value(envelope).map_err(|e| MessageError(e.to_string()))?;
+        let value = marshal(envelope)?;
         self.stubborn_link.send(&value, recipient).await?;
         Ok(())
     }
@@ -117,14 +119,13 @@ impl AuthenticateAndFilter {
                 None => break,
             };
 
-            let envelope: Envelope<Value, Vec<u8>> =
-                match serde_json::from_value(sbl_deliver.message) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        debug!("Error decoding envelope: {:?}", e);
-                        continue;
-                    }
-                };
+            let envelope: Envelope<Value, Vec<u8>> = match unmarshal(sbl_deliver.message) {
+                Ok(e) => e,
+                Err(e) => {
+                    debug!("Error decoding envelope: {:?}", e);
+                    continue;
+                }
+            };
 
             if !self.verify_signature(sbl_deliver.sender, &envelope) {
                 debug!("Invalid signature for sender {}", sbl_deliver.sender);
