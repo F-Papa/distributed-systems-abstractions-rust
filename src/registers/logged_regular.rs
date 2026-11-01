@@ -18,28 +18,15 @@ use crate::{
     broadcast::stubborn::StubbornBroadcast,
     common::{NodeId, marshal, unmarshal},
     links::{LinkError, stubborn_link::StubbornLink},
-    registers::RegisterIndication,
+    registers::RegisterIndication::{self, ReadReturn, WriteReturn},
 };
 
 #[derive(Serialize, Deserialize, Debug)]
 enum RegisterMessage<T> {
-    Write {
-        request_id: u32,
-        ts: u32,
-        value: T,
-    },
-    Ack {
-        request_id: u32,
-    },
-    Read {
-        request_id: u32,
-    },
-    Value {
-        request_id: u32,
-        ts: u32,
-        write_rank: u16,
-        value: T,
-    },
+    Write { request_id: u32, ts: u32, value: T },
+    Ack { request_id: u32 },
+    Read { request_id: u32 },
+    Value { request_id: u32, ts: u32, value: T },
 }
 
 #[async_trait]
@@ -87,6 +74,7 @@ where
     T: Sync + Send + Serialize + DeserializeOwned + Clone,
 {
     state: Mutex<State<T>>,
+    number_of_nodes: u16,
     filepath: Box<Path>,
     indications: Arc<Mutex<Option<mpsc::Receiver<RegisterIndication<T>>>>>,
     indications_tx: Mutex<Option<mpsc::Sender<RegisterIndication<T>>>>,
@@ -181,6 +169,7 @@ where
 {
     pub fn new(
         id: NodeId,
+        number_of_nodes: u16,
         broadcast: Arc<dyn StubbornBroadcast<Value>>,
         link: Arc<dyn StubbornLink<Value>>,
         filepath_override: Option<String>,
@@ -189,6 +178,7 @@ where
         let filepath = filepath_override.unwrap_or(format!("./data/register_{}.log", id));
 
         Self {
+            number_of_nodes,
             state: Mutex::from(State::default()),
             filepath: Box::from(Path::new(&filepath)),
             indications_tx: Mutex::from(Some(indications_tx)),
@@ -255,9 +245,81 @@ where
             None => return Err(LinkError::LinkClosed()),
         };
 
-        while let Some(delivery) = indications.recv().await {}
+        while let Some(delivery) = indications.recv().await {
+            let message: RegisterMessage<Option<T>> = match unmarshal(delivery.message) {
+                Ok(m) => m,
+                Err(e) => {
+                    debug!("error unmarshaling message: {:?}", e);
+                    continue;
+                }
+            };
+
+            if let RegisterMessage::Ack { request_id } = message {
+                let mut indication: Option<RegisterIndication<T>> = None;
+                {
+                    let mut state = self.state.lock().await;
+                    if request_id != state.request_id {
+                        continue;
+                    }
+                    state.acklist.insert(delivery.sender);
+                    if state.writing && state.acklist.len() > (self.number_of_nodes / 2) as usize {
+                        state.acklist.clear();
+                        state.writing = false;
+                        self.store(&state).await?;
+                        indication = Some(WriteReturn {});
+                    }
+                }
+
+                if let Some(i) = indication {
+                    tx.send(i)
+                        .await
+                        .map_err(LinkError::with_action("send write return indication"))?;
+                }
+            } else if let RegisterMessage::Value {
+                request_id,
+                ts,
+                value,
+            } = message
+            {
+                let mut indication: Option<RegisterIndication<T>> = None;
+                {
+                    let mut state = self.state.lock().await;
+                    if request_id != state.request_id {
+                        continue;
+                    }
+
+                    state.readlist.insert(delivery.sender, (ts, value.clone()));
+                    debug!(
+                        "#readlist: {}, majority: {}",
+                        state.readlist.len(),
+                        self.number_of_nodes / 2 + 1
+                    );
+                    if state.reading && state.readlist.len() > (self.number_of_nodes / 2) as usize {
+                        state.val = self.highestval(&state.readlist);
+                        state.readlist.clear();
+                        state.reading = false;
+                        indication = Some(ReadReturn(value));
+                    }
+                }
+
+                if let Some(i) = indication {
+                    tx.send(i)
+                        .await
+                        .map_err(LinkError::with_action("send read return indication"))?;
+                }
+            }
+        }
         Ok(())
     }
+
+    fn highestval(&self, readlist: &HashMap<NodeId, (u32, Option<T>)>) -> Option<T> {
+        readlist
+            .iter()
+            .max_by_key(|(_, (ts, _))| *ts)
+            .map(|(_, (_, value))| value.clone())
+            .unwrap_or(None)
+    }
+
     async fn handle_broadcast(&self) -> Result<(), LinkError> {
         let mut indications = match self.broadcast.take_indications().await {
             None => return Err(LinkError::LinkClosed()),
@@ -289,7 +351,14 @@ where
                 };
                 self.link.send(&marshal(response)?, delivery.sender).await?;
             } else if let RegisterMessage::Read { request_id } = message {
-                let response = RegisterMessage::<T>::Read { request_id };
+                let response = {
+                    let state = self.state.lock().await;
+                    RegisterMessage::Value {
+                        request_id,
+                        ts: state.timestamp,
+                        value: state.val.clone(),
+                    }
+                };
 
                 self.link.send(&marshal(response)?, delivery.sender).await?;
             }

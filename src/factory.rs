@@ -13,22 +13,33 @@ use crate::{
         reliable::{EagerReliableBroadcast, ReliableBroadcast},
         stubborn::{BasicStubbonBroadcast, StubbornBroadcast},
         uniform::{MajorityAckBroadcast, UniformBroadcast},
-    }, common::NodeId, crypto, factory, failure_detector::{
+    },
+    common::NodeId,
+    crypto, factory,
+    failure_detector::{
         eventually_perfect_failure_detector::{
             EventuallyPerfectFailureDetector, IncreasingTimeout,
         },
         perfect_failure_detector::{ExcludeOnTimeout, PerfectFailureDetector},
-    }, leader_election::{
+    },
+    leader_election::{
         LeaderElection, MonarchicalLeaderElection,
         byzantine_leader_election::{ByzantineLeaderElection, RotatingElection},
         eventual_leader_elector::{EventualLeaderElection, MonarchicalEventualLeaderElector},
-    }, links::{
+    },
+    links::{
         auth_perfect_link::{AuthenticatedPerfectLink, SignAndAcknowledge},
         fair_loss_link::{self, FairLossLink},
         perfect_link::{AcknowledgeMessages, PerfectLink},
         stubborn_link::{RetransmitForever, StubbornLink},
-    }, registers::{
-        atomic::{write_many_read_many::{AtomicRegister, ConsultMajorityRegister}, write_one_read_many::{OneManyAtomicRegister, WriteOneReadManyAtomic}}, regular::{OneManyRegularRegister, WriteOneReadAll},
+    },
+    registers::{
+        atomic::{
+            write_many_read_many::{AtomicRegister, ConsultMajorityRegister},
+            write_one_read_many::{OneManyAtomicRegister, WriteOneReadManyAtomic},
+        },
+        logged_regular::{LoggedMajorityVoting, LoggedRegularRegister},
+        regular::{OneManyRegularRegister, WriteOneReadAll},
     },
 };
 
@@ -232,10 +243,11 @@ where
 pub fn atomic_register<T>(
     fair_loss_link_1: FairLossLink,
     fair_loss_link_2: FairLossLink,
-    config: &ClusterConfig
-) -> Arc<dyn AtomicRegister<T>> 
+    config: &ClusterConfig,
+) -> Arc<dyn AtomicRegister<T>>
 where
-    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static {
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
     Arc::from(ConsultMajorityRegister::new(
         config.local_id,
         config.number_of_nodes,
@@ -244,3 +256,19 @@ where
     ))
 }
 
+pub fn logged_regular_register<T>(
+    fair_loss_link_1: FairLossLink,
+    fair_loss_link_2: FairLossLink,
+    config: &ClusterConfig,
+) -> Arc<dyn LoggedRegularRegister<T>>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    Arc::from(LoggedMajorityVoting::new(
+        config.local_id,
+        config.number_of_nodes,
+        stubborn_broadcast(fair_loss_link_1, config),
+        stubborn_link(fair_loss_link_2, config),
+        None
+    ))
+}

@@ -1,7 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use log::error;
-
 use crate::{
     common::{InputHandler, NodeId},
     factory::ClusterConfig,
@@ -48,7 +46,7 @@ async fn main() {
     .await
     .unwrap();
 
-    let register = factory::atomic_register::<usize>(fll1, fll2, &cluster_config);
+    let register = factory::logged_regular_register::<usize>(fll1, fll2, &cluster_config);
 
     let mut i = register.take_indications().await.unwrap();
     let print_returns = async move {
