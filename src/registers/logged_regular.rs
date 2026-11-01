@@ -5,14 +5,42 @@ use std::{
 };
 
 use async_trait::async_trait;
+use log::debug;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use tokio::{
     fs::{self, create_dir_all, rename},
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex, mpsc},
 };
 
-use crate::{common::NodeId, links::LinkError, registers::RegisterIndication};
+use crate::{
+    broadcast::stubborn::StubbornBroadcast,
+    common::{NodeId, marshal, unmarshal},
+    links::{LinkError, stubborn_link::StubbornLink},
+    registers::RegisterIndication,
+};
+
+#[derive(Serialize, Deserialize, Debug)]
+enum RegisterMessage<T> {
+    Write {
+        request_id: u32,
+        ts: u32,
+        value: T,
+    },
+    Ack {
+        request_id: u32,
+    },
+    Read {
+        request_id: u32,
+    },
+    Value {
+        request_id: u32,
+        ts: u32,
+        write_rank: u16,
+        value: T,
+    },
+}
 
 #[async_trait]
 pub trait LoggedRegularRegister<T>: Send + Sync
@@ -30,6 +58,7 @@ where
 struct State<T> {
     timestamp: u32,
     val: Option<T>,
+    write_timestamp: u32,
     request_id: u32,
     acklist: HashSet<NodeId>,
     readlist: HashMap<NodeId, (u32, Option<T>)>,
@@ -41,6 +70,8 @@ impl<T> Default for State<T> {
     fn default() -> Self {
         Self {
             timestamp: 0,
+
+            write_timestamp: 0,
             val: None,
             request_id: 0,
             acklist: HashSet::new(),
@@ -53,18 +84,120 @@ impl<T> Default for State<T> {
 
 pub struct LoggedMajorityVoting<T>
 where
-    T: Send + Serialize + DeserializeOwned + Clone,
+    T: Sync + Send + Serialize + DeserializeOwned + Clone,
 {
     state: Mutex<State<T>>,
     filepath: Box<Path>,
     indications: Arc<Mutex<Option<mpsc::Receiver<RegisterIndication<T>>>>>,
-    indications_tx: Mutex<Option<mpsc::Receiver<RegisterIndication<T>>>>,
+    indications_tx: Mutex<Option<mpsc::Sender<RegisterIndication<T>>>>,
+    broadcast: Arc<dyn StubbornBroadcast<Value>>,
+    link: Arc<dyn StubbornLink<Value>>,
+}
+
+#[async_trait]
+impl<T> LoggedRegularRegister<T> for LoggedMajorityVoting<T>
+where
+    T: Sync + Send + Serialize + DeserializeOwned + Clone,
+{
+    async fn start(&self) -> Result<(), LinkError> {
+        let message = {
+            let mut state = self.state.lock().await;
+            if let Ok(mut s) = self.retrieve().await {
+                s.readlist.clear();
+                s.reading = false;
+                *state = s;
+            }
+            if state.writing {
+                state.request_id += 1;
+                Some(RegisterMessage::Write {
+                    request_id: state.request_id,
+                    ts: state.timestamp,
+                    value: state.val.clone(),
+                })
+            } else {
+                None
+            }
+        };
+
+        if let Some(m) = message {
+            self.broadcast.broadcast(&marshal(m)?).await?;
+        }
+
+        tokio::try_join!(
+            self.handle_messages(),
+            self.handle_broadcast(),
+            self.broadcast.listen(),
+            self.link.listen()
+        )?;
+        Ok(())
+    }
+
+    async fn stop(&self) {
+        self.broadcast.close().await;
+        self.link.close().await;
+    }
+
+    async fn write(&self, value: T) -> Result<(), LinkError> {
+        let message = {
+            let mut state = self.state.lock().await;
+            state.write_timestamp += 1;
+            (state.timestamp, state.val) = (state.write_timestamp, Some(value.clone()));
+            state.request_id += 1;
+            state.acklist.clear();
+            state.writing = true;
+            self.store(&state).await?;
+            RegisterMessage::Write {
+                request_id: state.request_id,
+                ts: state.write_timestamp,
+                value,
+            }
+        };
+
+        self.broadcast.broadcast(&marshal(message)?).await
+    }
+    async fn read(&self) -> Result<(), LinkError> {
+        let message = {
+            let mut state = self.state.lock().await;
+            state.request_id += 1;
+            state.readlist.clear();
+            state.reading = true;
+
+            RegisterMessage::<T>::Read {
+                request_id: state.request_id,
+            }
+        };
+
+        self.broadcast.broadcast(&marshal(message)?).await
+    }
+
+    async fn take_indications(&self) -> Option<mpsc::Receiver<RegisterIndication<T>>> {
+        self.indications.lock().await.take()
+    }
 }
 
 impl<T> LoggedMajorityVoting<T>
 where
-    T: Send + Serialize + DeserializeOwned + Clone,
+    T: Sync + Send + Serialize + DeserializeOwned + Clone,
 {
+    pub fn new(
+        id: NodeId,
+        broadcast: Arc<dyn StubbornBroadcast<Value>>,
+        link: Arc<dyn StubbornLink<Value>>,
+        filepath_override: Option<String>,
+    ) -> Self {
+        let (indications_tx, indications) = mpsc::channel(32);
+        let filepath = filepath_override.unwrap_or(format!("./data/register_{}.log", id));
+
+        Self {
+            state: Mutex::from(State::default()),
+            filepath: Box::from(Path::new(&filepath)),
+            indications_tx: Mutex::from(Some(indications_tx)),
+            indications: Arc::from(Mutex::from(Some(indications))),
+            broadcast,
+            link,
+        }
+    }
+
     async fn store(&self, state: &State<T>) -> Result<(), LinkError> {
         if let Some(parent_dir) = self.filepath.parent()
             && !parent_dir.exists()
@@ -109,5 +242,58 @@ where
             .map_err(LinkError::with_action("decode register log"))?;
 
         Ok(state)
+    }
+
+    async fn handle_messages(&self) -> Result<(), LinkError> {
+        let mut indications = match self.link.take_indications().await {
+            None => return Err(LinkError::LinkClosed()),
+            Some(rx) => rx,
+        };
+
+        let tx = match self.indications_tx.lock().await.take() {
+            Some(tx) => tx,
+            None => return Err(LinkError::LinkClosed()),
+        };
+
+        while let Some(delivery) = indications.recv().await {}
+        Ok(())
+    }
+    async fn handle_broadcast(&self) -> Result<(), LinkError> {
+        let mut indications = match self.broadcast.take_indications().await {
+            None => return Err(LinkError::LinkClosed()),
+            Some(rx) => rx,
+        };
+
+        while let Some(delivery) = indications.recv().await {
+            let message: RegisterMessage<Option<T>> = match unmarshal(delivery.message) {
+                Ok(m) => m,
+                Err(e) => {
+                    debug!("error unmarshaling message: {:?}", e);
+                    continue;
+                }
+            };
+
+            if let RegisterMessage::Write {
+                request_id,
+                ts,
+                value,
+            } = message
+            {
+                let response = {
+                    let mut state = self.state.lock().await;
+                    if ts > state.timestamp {
+                        (state.timestamp, state.val) = (ts, (value));
+                        self.store(&state).await?;
+                    }
+                    RegisterMessage::<&T>::Ack { request_id }
+                };
+                self.link.send(&marshal(response)?, delivery.sender).await?;
+            } else if let RegisterMessage::Read { request_id } = message {
+                let response = RegisterMessage::<T>::Read { request_id };
+
+                self.link.send(&marshal(response)?, delivery.sender).await?;
+            }
+        }
+        Ok(())
     }
 }
