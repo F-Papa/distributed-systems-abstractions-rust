@@ -34,7 +34,7 @@ pub struct BasicStubbonBroadcast<T> {
     indications: Arc<Mutex<Option<mpsc::Receiver<BeDeliver>>>>,
     indications_tx: Mutex<Option<mpsc::Sender<BeDeliver>>>,
     local_id: NodeId,
-    peers: HashSet<NodeId>,
+    nodes: HashSet<NodeId>,
 }
 
 #[async_trait]
@@ -43,7 +43,7 @@ where
     T: Sync + Serialize,
 {
     async fn broadcast<'a>(&'a self, payload: &'a T) -> Result<(), LinkError> {
-        for p in self.peers.iter() {
+        for p in self.nodes.iter() {
             self.link.send(payload, *p).await?;
         }
         Ok(())
@@ -67,14 +67,14 @@ impl<T> BasicStubbonBroadcast<T>
 where
     T: Sync + Serialize,
 {
-    pub fn new(local_id: NodeId, peers: HashSet<NodeId>, link: Arc<dyn StubbornLink<T>>) -> Self {
+    pub fn new(local_id: NodeId, nodes: HashSet<NodeId>, link: Arc<dyn StubbornLink<T>>) -> Self {
         let (indications_tx, indications) = mpsc::channel(32);
         Self {
             link,
             indications: Arc::from(Mutex::from(Some(indications))),
             indications_tx: Mutex::from(Some(indications_tx)),
             local_id,
-            peers,
+            nodes,
         }
     }
     async fn handle_link_indications(&self) -> Result<(), LinkError> {

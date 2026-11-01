@@ -193,7 +193,7 @@ pub fn stubborn_broadcast(
 ) -> Arc<dyn StubbornBroadcast<Value>> {
     Arc::from(BasicStubbonBroadcast::new(
         config.local_id,
-        config.peers(),
+        config.nodes(),
         stubborn_link(fair_loss_link, config),
     ))
 }
