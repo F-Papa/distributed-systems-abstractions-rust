@@ -29,6 +29,7 @@ enum Protocol {
 struct Envelope<T: Serialize> {
     protocol: Protocol,
     payload: T,
+    retransmission: bool,
 }
 
 type OutboxEntry = (NodeId, Arc<Value>);
@@ -62,15 +63,20 @@ where
     T: Sync + Serialize,
 {
     async fn send<'a>(&'a self, payload: &'a T, recipient: NodeId) -> Result<(), LinkError> {
-        let payload = marshal(Envelope {
+        let mut envelope = Envelope {
             protocol: Protocol::RetransmitForever,
             payload,
-        })?;
+            retransmission: false,
+        };
+
+        let payload = marshal(&envelope)?;
         self.fair_loss_link.send(&payload, recipient).await?;
+
+        envelope.retransmission = true;
         self.outbox
             .lock()
             .await
-            .push((recipient, Arc::from(payload)));
+            .push((recipient, Arc::from(marshal(envelope)?)));
         Ok(())
     }
 
