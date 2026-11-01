@@ -163,10 +163,10 @@ impl FairLossLink {
     }
 
     pub async fn listen(&self) -> Result<(), LinkError> {
-        let mut indications_tx = self.indications_tx.lock().await;
-        if indications_tx.is_none() {
-            return Err(LinkError::LinkClosed());
-        }
+        let mut indications_tx = match self.indications_tx.lock().await.take() {
+            None => return Err(LinkError::LinkClosed()),
+            Some(i) => i,
+        };
 
         loop {
             let mut buf = [0_u8; MAX_LENGTH];
@@ -206,14 +206,11 @@ impl FairLossLink {
             };
 
             indications_tx
-                .as_ref()
-                .expect("get indications_tx")
                 .send(indication)
                 .await
                 .map_err(LinkError::with_action("send indication"))?;
         }
 
-        *indications_tx = None;
         debug!("finished");
         Ok(())
     }

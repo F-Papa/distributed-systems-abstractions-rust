@@ -139,26 +139,27 @@ impl RetransmitForever {
     }
 
     async fn handle_indications(&self) -> Result<(), LinkError> {
-        let indications_tx = self.indications_tx.lock().await.take();
-        let mut fll_indications = self
-            .fair_loss_link
-            .take_indications()
-            .await
-            .ok_or_else(|| LinkError::InternalError("indications receiver already taken".into()))?;
+        let indications_tx = match self.indications_tx.lock().await.take() {
+            None => return Err(LinkError::LinkClosed()),
+            Some(i) => i,
+        };
+        let mut fll_indications = match self.fair_loss_link.take_indications().await {
+            None => return Err(LinkError::LinkClosed()),
+            Some(i) => i,
+        };
 
-        while let (Some(fll_indication), Some(tx)) =
-            (fll_indications.recv().await, indications_tx.as_ref())
-        {
+        while let Some(fll_indication) = fll_indications.recv().await {
             let envelope: Envelope<Value> = match unmarshal(fll_indication.message) {
                 Ok(envelope) => envelope,
                 Err(_) => continue,
             };
-            tx.send(SblDeliver {
-                message: envelope.payload,
-                sender: fll_indication.sender,
-            })
-            .await
-            .map_err(LinkError::with_action("send indication"))?;
+            indications_tx
+                .send(SblDeliver {
+                    message: envelope.payload,
+                    sender: fll_indication.sender,
+                })
+                .await
+                .map_err(LinkError::with_action("send indication"))?;
         }
         Ok(())
     }
