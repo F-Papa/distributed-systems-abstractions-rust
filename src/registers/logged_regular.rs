@@ -363,6 +363,10 @@ where
                 self.link.send(&marshal(response)?, delivery.sender).await?;
             }
         }
+        /*Note that stubborn links are implemented by retransmitting messages periodi-
+        cally; however, this retransmission can be stopped by a writer and a reader once it
+        has logged the reply from some process or, at the latest, once it receives enough
+        replies and has completed its operation.*/
         Ok(())
     }
 }
