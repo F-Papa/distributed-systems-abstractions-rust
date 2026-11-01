@@ -1,22 +1,16 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use log::debug;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Serialize;
 use tokio::{
     sync::{Mutex, mpsc},
     try_join,
 };
-use uuid::Uuid;
 
 use crate::{
-    broadcast::best_effort::{BeDeliver, BestEffortBroadcast},
+    broadcast::best_effort::BeDeliver,
     common::NodeId,
-    links::{LinkError, fair_loss_link::FairLossLink, stubborn_link::StubbornLink},
+    links::{LinkError, stubborn_link::StubbornLink},
 };
 pub type SbDeliver = BeDeliver;
 
@@ -33,7 +27,6 @@ pub struct BasicStubbonBroadcast<T> {
     link: Arc<dyn StubbornLink<T>>,
     indications: Arc<Mutex<Option<mpsc::Receiver<BeDeliver>>>>,
     indications_tx: Mutex<Option<mpsc::Sender<BeDeliver>>>,
-    local_id: NodeId,
     nodes: HashSet<NodeId>,
 }
 
@@ -67,13 +60,12 @@ impl<T> BasicStubbonBroadcast<T>
 where
     T: Sync + Serialize,
 {
-    pub fn new(local_id: NodeId, nodes: HashSet<NodeId>, link: Arc<dyn StubbornLink<T>>) -> Self {
+    pub fn new(nodes: HashSet<NodeId>, link: Arc<dyn StubbornLink<T>>) -> Self {
         let (indications_tx, indications) = mpsc::channel(32);
         Self {
             link,
             indications: Arc::from(Mutex::from(Some(indications))),
             indications_tx: Mutex::from(Some(indications_tx)),
-            local_id,
             nodes,
         }
     }
