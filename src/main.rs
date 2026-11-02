@@ -14,6 +14,7 @@ pub mod failure_detector;
 pub mod leader_election;
 pub mod links;
 pub mod registers;
+pub mod consensus;
 
 #[tokio::main]
 async fn main() {
@@ -84,3 +85,4 @@ async fn main() {
     )
     .unwrap();
 }
+
