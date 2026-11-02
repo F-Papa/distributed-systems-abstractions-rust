@@ -1,10 +1,11 @@
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
 
 use log::debug;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
@@ -15,42 +16,44 @@ use crate::{
     links::{LinkError, perfect_link::PerfectLink},
 };
 
+#[derive(Debug)]
 pub struct Decided<T> {
     value: T,
+}
+
+#[derive(Clone, Serialize, Debug, Deserialize)]
+struct Proposal<T> {
+    pub id: usize,
+    pub value: T,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum PaxosMessage<T> {
     Prepare { id: usize },
     Promise { id: usize, accepted: Option<T> },
-    Commit { id: usize, value: T },
-    Accepted { id: usize, value: T },
+    Commit(Proposal<T>),
+    Accepted(Proposal<T>),
 }
 
-impl<T> PaxosMessage<T>
+fn promised_value<T>(promise: &Option<PaxosMessage<T>>) -> Option<T>
 where
     T: Clone,
 {
-    pub fn promised_value(&self) -> Option<T> {
-        match self {
-            Promise { id, accepted } => accepted.clone(),
-            _ => None,
-        }
+    match promise {
+        Some(Promise { id: _, accepted }) => accepted.clone(),
+        _ => None,
     }
 }
-
-struct Proposal<T> {
-    is: usize,
-    value: T
-}
-
 struct State<T> {
     promise: Option<PaxosMessage<T>>,
-    proposal: Option<(usize, T)>,
+    proposal: Option<Proposal<T>>,
     acks: HashSet<NodeId>,
+    acceptances: HashMap<usize, (usize, Proposal<T>)>,
+    decided: Option<Proposal<T>>,
 }
 
 pub struct Paxos<T> {
+    local_id: NodeId,
     number_of_nodes: usize,
     state: Mutex<State<T>>,
     indications: Arc<Mutex<Option<mpsc::Receiver<Decided<T>>>>>,
@@ -59,24 +62,126 @@ pub struct Paxos<T> {
     link: Arc<dyn PerfectLink<Value>>,
 }
 
+fn get_id(nano: u128, number_of_nodes: usize, node_id: usize) -> usize {
+    ((nano as usize) / number_of_nodes) * number_of_nodes + node_id
+}
+
 impl<T> Paxos<T>
 where
-    T: std::fmt::Debug + Serialize + Clone,
+    T: std::fmt::Debug + Serialize + Clone + DeserializeOwned + Send + 'static,
 {
+    pub fn new(
+        local_id: NodeId,
+        number_of_nodes: usize,
+        broadcast: Arc<dyn BestEffortBroadcast<Value>>,
+        link: Arc<dyn PerfectLink<Value>>,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(32);
+        Self {
+            local_id,
+            number_of_nodes,
+            state: Mutex::from(State {
+                decided: None,
+                acceptances: HashMap::new(),
+                proposal: None,
+                promise: None,
+                acks: HashSet::new(),
+            }),
+            indications: Arc::from(Mutex::from(Some(rx))),
+            indications_tx: Mutex::from(Some(tx)),
+            broadcast,
+            link,
+        }
+    }
+
+    pub async fn take_indications(&self) -> Option<mpsc::Receiver<Decided<T>>> {
+        self.indications.lock().await.take()
+    }
+
+    async fn do_propose(self: Arc<Self>, value: T) -> Result<(), LinkError> {
+        let mut backoff = Duration::from_millis(300);
+        loop {
+            let broadcast = {
+                let mut state = self.state.lock().await;
+                if state.decided.is_some() {
+                    return Ok(());
+                }
+
+                let ts = SystemTime::now();
+                let duration = ts.duration_since(UNIX_EPOCH).expect("Time went backwards");
+                let nano = duration.as_nanos();
+                let proposal_id = get_id(nano, self.number_of_nodes, self.local_id.get() as usize);
+
+                state.proposal = Some(Proposal {
+                    id: proposal_id,
+                    value: value.clone(),
+                });
+                Prepare::<T> { id: proposal_id }
+            };
+
+            debug!("proposing: {:?}", broadcast);
+            self.broadcast.broadcast(&marshal(broadcast)?).await?;
+            tokio::time::sleep(backoff).await;
+            backoff = backoff * 2;
+        }
+    }
+
+    pub async fn propose(self: Arc<Self>, value: T) -> Result<(), LinkError> {
+        tokio::spawn(async { self.do_propose(value).await });
+        //todo: save and join handle
+        Ok(())
+    }
+
+    pub async fn start(&self) -> Result<(), LinkError> {
+        tokio::try_join!(
+            self.link.listen(),
+            self.broadcast.listen(),
+            self.handle_messages(),
+            self.handle_broadcast()
+        )?;
+        Ok(())
+    }
+
     async fn handle_accepted(
         &self,
         sender: NodeId,
-        commit: &PaxosMessage<T>,
+        tx: &mpsc::Sender<Decided<T>>,
+        accepted: &PaxosMessage<T>,
     ) -> Result<(), LinkError> {
-        if let Accepted { id, value } = commit {}
+        if let Accepted(Proposal { id, value }) = accepted {
+            let mut state = self.state.lock().await;
+            let entry = state.acceptances.entry(*id).or_insert((
+                0,
+                Proposal {
+                    id: *id,
+                    value: value.clone(),
+                },
+            ));
+
+            entry.0 += 1;
+            let entry = (entry.0, entry.1.clone());
+
+            debug!("received accept from {sender}. Entry: {:?}", entry);
+            if let None = state.decided
+                && entry.0 > self.number_of_nodes / 2
+            {
+                state.decided = Some(entry.1.clone());
+                tx.send(Decided {
+                    value: entry.1.value,
+                })
+                .await
+                .map_err(LinkError::with_action("send decided indication"))?
+            }
+        }
         Ok(())
     }
+
     async fn handle_commit(
         &self,
         sender: NodeId,
         commit: &PaxosMessage<T>,
     ) -> Result<(), LinkError> {
-        if let Commit { id, value } = commit {
+        if let Commit(Proposal { id, value }) = commit {
             let response = {
                 let state = self.state.lock().await;
                 match state.promise.as_ref() {
@@ -88,7 +193,7 @@ where
                             "accepting: {:?} from {sender}. Promised: {:?}",
                             commit, state.promise
                         );
-                        Some(marshal(&Accepted { id: *id, value })?)
+                        Some(marshal(&Accepted(Proposal { id: *id, value }))?)
                     }
                     _ => {
                         debug!(
@@ -109,37 +214,38 @@ where
     async fn handle_promise(
         &self,
         sender: NodeId,
-        prepare: &PaxosMessage<T>,
+        promise: &PaxosMessage<T>,
     ) -> Result<(), LinkError> {
-        if let Promise { id, accepted } = prepare {
-            let mut acceptors: Option<&HashSet<NodeId>> = None;
+        if let Promise { id, accepted } = promise {
+            let mut acceptors: Option<HashSet<NodeId>> = None;
             let mut broadcast: Option<PaxosMessage<T>> = None;
             {
                 let mut state = self.state.lock().await;
                 if let Some(proposal) = &state.proposal
-                    && *id == proposal.0
+                    && *id == proposal.id
                 {
-                    let value = accepted.as_ref().unwrap_or(&proposal.1).clone();
-                    state.proposal = Some((*id, value));
+                    let value = accepted.as_ref().unwrap_or(&proposal.value).clone();
+                    state.proposal = Some(Proposal {
+                        id: *id,
+                        value: value.clone(),
+                    });
                     state.acks.insert(sender);
-                    if state.acks.len() > self.number_of_nodes / 2 {
-                        broadcast = Some(Commit {
-                            id: *id,
-                            value: (&(state.proposal).as_ref().unwrap().1).clone(),
-                        });
-                    }
 
-                    acceptors = Some(&state.acks);
+                    if state.acks.len() > self.number_of_nodes / 2 {
+                        broadcast = Some(Commit(Proposal { id: *id, value }));
+                        acceptors = Some(state.acks.clone());
+                    }
                 };
             }
 
-            if let Some(acceptors) = acceptors {
+            if let Some(mut acceptors) = acceptors {
+                let broadcast = broadcast.unwrap();
                 debug!(
                     "received {} promises. sending: {:?}",
                     acceptors.len(),
-                    broadcast.unwrap()
+                    broadcast
                 );
-                let broadcast = marshal(broadcast.unwrap())?;
+                let broadcast = marshal(broadcast)?;
                 for id in acceptors.drain() {
                     self.link.send(&broadcast, id).await?;
                 }
@@ -154,13 +260,13 @@ where
         prepare: &PaxosMessage<T>,
     ) -> Result<(), LinkError> {
         if let Prepare { id } = prepare {
-            let response: Option<&PaxosMessage<T>> = {
+            let response: Option<PaxosMessage<T>> = {
                 let mut state = self.state.lock().await;
-                match state.promise {
+                match state.promise.as_ref() {
                     Some(Promise {
                         id: promised_id,
                         accepted,
-                    }) if promised_id > *id => {
+                    }) if promised_id > id => {
                         // Promised higher id, ignore
                         debug!(
                             "ignoring: {:?} from {sender}. Promised: {:?}",
@@ -174,11 +280,14 @@ where
                             "promising: {:?} to {sender}. Promised: {:?}",
                             prepare, state.promise
                         );
-                        state.promise = Some(Promise {
+
+                        let promise = Promise::<T> {
                             id: *id,
-                            accepted: state.promise.map(PaxosMessage::promised_value),
-                        });
-                        state.promise.as_ref()
+                            accepted: promised_value(&state.promise),
+                        };
+
+                        state.promise = Some(promise.clone());
+                        Some(promise)
                     }
                 }
             };
@@ -191,9 +300,14 @@ where
     }
 
     async fn handle_broadcast(&self) -> Result<(), LinkError> {
-        let mut indications = match self.link.take_indications().await {
-            None => return Err(LinkError::LinkClosed()),
+        let mut indications = match self.broadcast.take_indications().await {
+            None => return Err(LinkError::InternalError("take bc indications".to_owned())),
             Some(rx) => rx,
+        };
+
+        let tx = match self.indications_tx.lock().await.take() {
+            Some(tx) => tx,
+            None => return Err(LinkError::InternalError("take indications tx".to_owned())),
         };
 
         while let Some(delivery) = indications.recv().await {
@@ -207,6 +321,8 @@ where
 
             if matches!(message, Prepare { .. }) {
                 self.handle_prepare(delivery.sender, &message).await?;
+            } else if matches!(message, Accepted(..)) {
+                self.handle_accepted(delivery.sender, &tx, &message).await?;
             }
         }
         Ok(())
@@ -214,13 +330,8 @@ where
 
     async fn handle_messages(&self) -> Result<(), LinkError> {
         let mut indications = match self.link.take_indications().await {
-            None => return Err(LinkError::LinkClosed()),
+            None => return Err(LinkError::InternalError("take link indications".to_owned())),
             Some(rx) => rx,
-        };
-
-        let tx = match self.indications_tx.lock().await.take() {
-            Some(tx) => tx,
-            None => return Err(LinkError::LinkClosed()),
         };
 
         while let Some(delivery) = indications.recv().await {

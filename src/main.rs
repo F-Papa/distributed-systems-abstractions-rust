@@ -2,19 +2,20 @@ use std::{sync::Arc, time::Duration};
 
 use crate::{
     common::{InputHandler, NodeId},
+    consensus::paxos::Paxos,
     factory::ClusterConfig,
     links::{LinkError, LocalhostResolver, fair_loss_link::FairLossLink},
 };
 
 mod broadcast;
 pub mod common;
+pub mod consensus;
 pub mod crypto;
 pub mod factory;
 pub mod failure_detector;
 pub mod leader_election;
 pub mod links;
 pub mod registers;
-pub mod consensus;
 
 #[tokio::main]
 async fn main() {
@@ -47,9 +48,15 @@ async fn main() {
     .await
     .unwrap();
 
-    let register = factory::logged_regular_register::<usize>(fll1, fll2, &cluster_config);
+    // let register = factory::logged_regular_register::<usize>(fll1, fll2, &cluster_config);
+    let paxos = Arc::from(Paxos::<usize>::new(
+        cluster_config.local_id,
+        cluster_config.number_of_nodes as usize,
+        factory::best_effort_broadcast(fll1, &cluster_config),
+        factory::perfect_link(fll2, &cluster_config),
+    ));
 
-    let mut i = register.take_indications().await.unwrap();
+    let mut i = paxos.take_indications().await.unwrap();
     let print_returns = async move {
         while let Some(i) = i.recv().await {
             println!("\n{:?}\n", i);
@@ -57,32 +64,32 @@ async fn main() {
         Ok::<(), LinkError>(())
     };
 
-    let register_cpy = register.clone();
+    let register_cpy = paxos.clone();
     let write_input = async |input: String| {
         register_cpy
-            .write(input.strip_suffix("\n").unwrap().parse::<usize>().unwrap())
+            .clone()
+            .propose(input.strip_suffix("\n").unwrap().parse::<usize>().unwrap())
             .await?;
         Ok::<(), LinkError>(())
     };
 
-    let register_cpy2 = register_cpy.clone();
-    let read_value = async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            register_cpy2.read().await;
-        }
-        Ok::<(), LinkError>(())
-    };
+    // let register_cpy2 = register_cpy.clone();
+    // let read_value = async move {
+    //     loop {
+    //         tokio::time::sleep(Duration::from_secs(2)).await;
+    //         register_cpy2.read().await;
+    //     }
+    //     Ok::<(), LinkError>(())
+    // };
 
     let input_handler = Arc::from(InputHandler::new());
     input_handler.clone().start();
 
     tokio::try_join!(
-        register.start(),
+        paxos.start(),
         print_returns,
         input_handler.handle_input(write_input),
-        read_value
+        // read_value
     )
     .unwrap();
 }
-

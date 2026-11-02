@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, time::Duration};
 
 use log::debug;
 use serde::{Deserialize, Serialize};
@@ -139,6 +139,9 @@ impl FairLossLink {
                 MAX_LENGTH
             )));
         }
+
+        let sleep_time = Duration::from_millis(rand::random_range(200..=1000));
+        tokio::time::sleep(sleep_time).await;
 
         self.socket
             .send_to(&bytes, addr)
