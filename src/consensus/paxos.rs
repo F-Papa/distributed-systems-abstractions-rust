@@ -62,7 +62,10 @@ pub struct Paxos<T> {
     link: Arc<dyn PerfectLink<Value>>,
 }
 
-fn get_id(nano: u128, number_of_nodes: usize, node_id: usize) -> usize {
+fn get_id(node_id: usize, number_of_nodes: usize) -> usize {
+    let ts = SystemTime::now();
+    let duration = ts.duration_since(UNIX_EPOCH).expect("Time went backwards");
+    let nano = duration.as_nanos();
     ((nano as usize) / number_of_nodes) * number_of_nodes + node_id
 }
 
@@ -100,28 +103,29 @@ where
 
     async fn do_propose(self: Arc<Self>, value: T) -> Result<(), LinkError> {
         let mut backoff = Duration::from_millis(300);
+        let get_jitter = || Duration::from_millis(rand::random_range(0..=1000));
         loop {
             let broadcast = {
                 let mut state = self.state.lock().await;
-                if state.decided.is_some() {
+                if state.acks.len() >= self.number_of_nodes / 2 {
                     return Ok(());
                 }
+                state.acks.clear();
 
-                let ts = SystemTime::now();
-                let duration = ts.duration_since(UNIX_EPOCH).expect("Time went backwards");
-                let nano = duration.as_nanos();
-                let proposal_id = get_id(nano, self.number_of_nodes, self.local_id.get() as usize);
-
+                let new_proposal_id = get_id(self.number_of_nodes, self.local_id.get() as usize);
                 state.proposal = Some(Proposal {
-                    id: proposal_id,
+                    id: new_proposal_id,
                     value: value.clone(),
                 });
-                Prepare::<T> { id: proposal_id }
+
+                Prepare::<T> {
+                    id: new_proposal_id,
+                }
             };
 
             debug!("proposing: {:?}", broadcast);
             self.broadcast.broadcast(&marshal(broadcast)?).await?;
-            tokio::time::sleep(backoff).await;
+            tokio::time::sleep(backoff + get_jitter()).await;
             backoff = backoff * 2;
         }
     }
