@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 
+use crate::broadcast;
 use crate::consensus::multi_paxos::PaxosMessage::Ack;
+use crate::links::LinkError::InternalError;
 use crate::{
     broadcast::best_effort::BestEffortBroadcast,
     common::{NodeId, marshal, unmarshal},
@@ -57,7 +59,7 @@ struct State<T> {
     open_decision: HashMap<usize, (T, usize)>,
     proposal: Option<OpenProposal<T>>,
     promised_id: Option<(NodeId, u128)>,
-    id: u128,
+    proposed_id: u128,
 }
 
 pub struct MultiPaxos<T> {
@@ -100,7 +102,7 @@ where
                 decisions: HashMap::new(),
                 open_decision: HashMap::new(),
                 promised_id: None,
-                id: 0,
+                proposed_id: 0,
                 proposal: None,
             }),
             indications: Arc::from(Mutex::from(Some(rx))),
@@ -113,27 +115,28 @@ where
     pub async fn take_indications(&self) -> Option<mpsc::Receiver<Decided<T>>> {
         self.indications.lock().await.take()
     }
-
-    async fn do_propose(self: Arc<Self>, value: T) -> Result<(), LinkError> {
-        let mut backoff = Duration::from_millis(3000);
-        let slot = {
+    pub async fn propose(self: Arc<Self>, value: T) -> Result<(), LinkError> {
+        let mut broadcast: PaxosMessage<T> = {
             let mut state = self.state.lock().await;
-            state.current_slot += 1;
             if state.proposal.is_some() {
-                return Err(LinkError::InternalError(
-                    "Cannot propose with another active proposal".to_owned(),
-                ));
+                return Err(InternalError("proposal is still open".to_owned()));
             }
-            state.current_slot
-        };
 
-        loop {
-            let broadcast = {
-                let mut state = self.state.lock().await;
-                let proposal_id = get_id(self.number_of_nodes, self.local_id.get() as usize);
-                state.id = proposal_id;
+            state.current_slot += 1;
+
+            if let Some((promised_to, id)) = state.promised_id
+                && promised_to == self.local_id
+            {
+                // Node is already leader
+                let message = Commit {
+                    id: state.proposed_id,
+                    proposal: Proposal {
+                        slot: state.current_slot,
+                        value: value.clone(),
+                    },
+                };
                 state.proposal = Some(OpenProposal {
-                    id: proposal_id,
+                    id,
                     acks: HashSet::new(),
                     acceptances: HashSet::new(),
                     proposal: Proposal {
@@ -141,48 +144,57 @@ where
                         value: value.clone(),
                     },
                 });
-                Prepare::<T>(proposal_id)
-            };
-
-            debug!("proposing: {:?}", broadcast);
-            self.broadcast.broadcast(&marshal(broadcast)?).await?;
-            let time = backoff + get_jitter();
-            debug!("sleeping: {:?}", time);
-            tokio::time::sleep(time).await;
-
-            backoff = backoff * 2;
-            let state = self.state.lock().await;
-            if state.proposal.is_none() || state.current_slot > slot {
-                return Ok(());
-            }
-        }
-    }
-
-    pub async fn propose(self: Arc<Self>, value: T) -> Result<(), LinkError> {
-        let broadcast = {
-            let mut state = self.state.lock().await;
-            if let Some((promised_to, _)) = state.promised_id
-                && promised_to == self.local_id
-            {
-                state.current_slot += 1;
-                Some(Commit {
-                    id: state.id,
+                debug!("sending commit directly (is_leader): {:?}", message);
+                message
+            } else {
+                // Node needs to become leader
+                let new_id = get_id(self.number_of_nodes, self.local_id.get() as usize);
+                state.proposed_id = new_id;
+                state.proposal = Some(OpenProposal {
+                    id: new_id,
+                    acks: HashSet::new(),
+                    acceptances: HashSet::new(),
                     proposal: Proposal {
                         slot: state.current_slot,
                         value: value.clone(),
                     },
-                })
-            } else {
-                None
+                });
+                debug!("proposing {:?}", state.proposal);
+                Prepare::<T>(new_id)
             }
         };
-        if let Some(message) = broadcast {
-            debug!("sending commit directly (is_leader): {:?}", message);
-            self.broadcast.broadcast(&marshal(message)?).await
-        } else {
-            //TODO: save and join handle
-            tokio::spawn(async { self.do_propose(value).await });
-            Ok(())
+
+        self.broadcast.broadcast(&marshal(broadcast)?).await?;
+        let mut backoff = Duration::from_millis(3000);
+        loop {
+            tokio::time::sleep(backoff + get_jitter()).await;
+            broadcast = {
+                let mut state = self.state.lock().await;
+
+                if state.proposal.is_none()
+                    || state.current_slot > state.proposal.as_ref().unwrap().proposal.slot
+                {
+                    debug!("Cancelling proposal {:?}", state.proposal);
+                    state.proposal = None;
+                    return Ok(());
+                }
+
+                let new_id = get_id(self.number_of_nodes, self.local_id.get() as usize);
+                state.proposed_id = new_id;
+                state.proposal = Some(OpenProposal {
+                    id: new_id,
+                    acks: HashSet::new(),
+                    acceptances: HashSet::new(),
+                    proposal: Proposal {
+                        slot: state.current_slot,
+                        value: value.clone(),
+                    },
+                });
+                debug!("proposing {:?}", state.proposal);
+                Prepare::<T>(new_id)
+            };
+            self.broadcast.broadcast(&marshal(broadcast)?).await?;
+            backoff = backoff * 2;
         }
     }
 
@@ -394,6 +406,8 @@ where
                 self.handle_prepare(delivery.sender, &message).await?;
             } else if matches!(message, Accepted { .. }) {
                 self.handle_accepted(delivery.sender, &tx, &message).await?;
+            } else if matches!(message, Commit { .. }) {
+                self.handle_commit(delivery.sender, &message).await?
             }
         }
         Ok(())
