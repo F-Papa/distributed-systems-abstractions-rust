@@ -1,10 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    common::{InputHandler, NodeId},
-    consensus::paxos::Paxos,
-    factory::ClusterConfig,
-    links::{LinkError, LocalhostResolver, fair_loss_link::FairLossLink},
+    common::{InputHandler, NodeId}, consensus::{multi_paxos::MultiPaxos, paxos::Paxos}, factory::ClusterConfig, links::{LinkError, LocalhostResolver, fair_loss_link::FairLossLink},
 };
 
 mod broadcast;
@@ -49,7 +46,7 @@ async fn main() {
     .unwrap();
 
     // let register = factory::logged_regular_register::<usize>(fll1, fll2, &cluster_config);
-    let paxos = Arc::from(Paxos::<usize>::new(
+    let paxos = Arc::from(MultiPaxos::<usize>::new(
         cluster_config.local_id,
         cluster_config.number_of_nodes as usize,
         factory::best_effort_broadcast(fll1, &cluster_config),
