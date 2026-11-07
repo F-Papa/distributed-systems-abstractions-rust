@@ -34,8 +34,10 @@ struct SlotValue<T> {
     pub value: T,
 }
 
+#[derive(Clone, Serialize, Debug, Deserialize)]
 struct LearnedValue<T> {
-    pub value: Arc<T>,
+    pub id: u128,
+    pub value: T,
     pub accepted_by: HashSet<NodeId>,
 }
 
@@ -46,7 +48,8 @@ enum PaxosMessage<T> {
     },
     Ack {
         id: u128,
-        decisions: HashMap<usize, T>,
+        settled_decisions: HashMap<usize, T>,
+        open_decisions: HashMap<usize, LearnedValue<T>>,
     },
     Commit {
         id: u128,
@@ -61,7 +64,7 @@ enum PaxosMessage<T> {
 struct State<T> {
     current_slot: usize,
     sent_proposal: Option<Proposal<Arc<T>>>,
-    open_decision: HashMap<usize, LearnedValue<T>>,
+    open_decisions: HashMap<usize, LearnedValue<Arc<T>>>,
     settled_decisions: HashMap<usize, Arc<T>>,
     promised_id: Option<(NodeId, u128)>,
     proposed_id: u128,
@@ -73,6 +76,7 @@ pub struct MultiPaxos<T> {
     state: Mutex<State<T>>,
     indications: Arc<Mutex<Option<mpsc::Receiver<Decided<T>>>>>,
     indications_tx: Mutex<Option<mpsc::Sender<Decided<T>>>>,
+    indications_tx2: Mutex<Option<mpsc::Sender<Decided<T>>>>,
     broadcast: Arc<dyn BestEffortBroadcast<Value>>,
     link: Arc<dyn PerfectLink<Value>>,
 }
@@ -105,13 +109,14 @@ where
             state: Mutex::from(State {
                 current_slot: 0,
                 settled_decisions: HashMap::new(),
-                open_decision: HashMap::new(),
+                open_decisions: HashMap::new(),
                 promised_id: None,
                 proposed_id: 0,
                 sent_proposal: None,
             }),
             indications: Arc::from(Mutex::from(Some(rx))),
-            indications_tx: Mutex::from(Some(tx)),
+            indications_tx: Mutex::from(Some(tx.clone())),
+            indications_tx2: Mutex::from(Some(tx)),
             broadcast,
             link,
         }
@@ -122,7 +127,7 @@ where
     }
 
     async fn new_proposal(&self, value: Arc<T>, state: &mut State<T>) -> PaxosMessage<Arc<T>> {
-        let new_id = get_id(self.number_of_nodes, self.local_id.get() as usize);
+        let new_id = get_id(self.local_id.get() as usize, self.number_of_nodes);
         state.proposed_id = new_id;
         state.sent_proposal = Some(Proposal {
             id: new_id,
@@ -240,16 +245,16 @@ where
             let value = Arc::from(accepted_proposal.value);
             let slot = accepted_proposal.slot;
 
-            state.current_slot = accepted_proposal.slot;
+            state.current_slot = state.current_slot.max(accepted_proposal.slot);
 
-            let committed_value =
-                state
-                    .open_decision
-                    .entry(accepted_proposal.slot)
-                    .or_insert(LearnedValue {
-                        value: Arc::clone(&value),
-                        accepted_by: HashSet::new(),
-                    });
+            let committed_value = state
+                .open_decisions
+                .entry(accepted_proposal.slot)
+                .or_insert(LearnedValue {
+                    id: accepted_id,
+                    value: Arc::clone(&value),
+                    accepted_by: HashSet::new(),
+                });
 
             committed_value.accepted_by.insert(sender);
 
@@ -261,19 +266,49 @@ where
             );
 
             if committed_value.accepted_by.len() > self.number_of_nodes / 2 {
-                let settled_decision = state.open_decision.remove(&accepted_proposal.slot).unwrap();
-                debug!("committing id: {}", accepted_id);
-                state.sent_proposal = None;
-                state
+                let last_settled_slot = state
                     .settled_decisions
-                    .insert(accepted_proposal.slot, Arc::from(settled_decision.value));
+                    .iter()
+                    .map(|(s, _)| *s)
+                    .max()
+                    .unwrap_or(0);
 
-                state.open_decision.remove(&accepted_proposal.slot);
-                tx.send(Decided {
-                    value: (*value).clone(),
-                })
-                .await
-                .map_err(LinkError::with_action("send decided indication"))?
+                let highest_learned_slot = state
+                    .open_decisions
+                    .iter()
+                    .map(|(s, _)| *s)
+                    .max()
+                    .unwrap_or(slot);
+
+                if accepted_proposal.slot == last_settled_slot + 1 {
+                    for i in slot..=highest_learned_slot {
+                        let was_settled = state
+                            .open_decisions
+                            .get(&i)
+                            .map(|x| x.accepted_by.len() > self.number_of_nodes / 2)
+                            .unwrap_or(false);
+
+                        if was_settled {
+                            let settled_decision = state
+                                .open_decisions
+                                .remove(&accepted_proposal.slot)
+                                .unwrap();
+
+                            debug!("committing id: {}", accepted_id);
+                            state.sent_proposal = None;
+                            state
+                                .settled_decisions
+                                .insert(accepted_proposal.slot, Arc::from(settled_decision.value));
+
+                            state.open_decisions.remove(&accepted_proposal.slot);
+                            tx.send(Decided {
+                                value: (*value).clone(),
+                            })
+                            .await
+                            .map_err(LinkError::with_action("send decided indication"))?
+                        }
+                    }
+                }
             }
         } else {
             debug!(
@@ -291,7 +326,7 @@ where
         committed_value: SlotValue<T>,
     ) -> Result<(), LinkError> {
         let response = {
-            let state = self.state.lock().await;
+            let mut state = self.state.lock().await;
             match state.promised_id {
                 Some(x) if x.1 == committed_id => {}
                 _ => {
@@ -310,6 +345,15 @@ where
                 );
                 None
             } else {
+                state
+                    .open_decisions
+                    .entry(committed_value.slot)
+                    .or_insert(LearnedValue {
+                        id: committed_id,
+                        value: Arc::from(committed_value.value.clone()),
+                        accepted_by: HashSet::new(),
+                    });
+
                 debug!("received new commit: {:?} from {sender}", committed_value);
                 Some(Accepted {
                     id: committed_id,
@@ -329,6 +373,8 @@ where
         sender: NodeId,
         ack_id: u128,
         settled_decisions: HashMap<usize, T>,
+        open_decisions: HashMap<usize, LearnedValue<T>>,
+        tx: &mpsc::Sender<Decided<T>>,
     ) -> Result<(), LinkError> {
         let mut acceptors: Option<HashSet<NodeId>> = None;
         let mut broadcast: Option<Value> = None;
@@ -339,42 +385,98 @@ where
                 return Ok(());
             }
 
-            let learned_decisions: Vec<(usize, T)> = settled_decisions
+            let mut learned_settled: Vec<(usize, T)> = settled_decisions
                 .into_iter()
                 .filter(|(s, _)| !state.settled_decisions.contains_key(&s))
                 .collect();
 
+            learned_settled.sort_by_key(|(slot, _)| *slot);
+
             debug!(
-                "Acks from {sender}. learned_decisions: {:?}",
-                learned_decisions
+                "Acks from {sender}. learned_settled: {:?}, learned_open: {:?}",
+                learned_settled, open_decisions
             );
 
-            if let Some(last_slot) = learned_decisions.iter().map(|(s, _)| *s).max() {
-                if state.current_slot < last_slot {
-                    debug!("cancelling old proposal and moving to {last_slot}");
-                    state.current_slot = last_slot;
-                    state.sent_proposal = None;
-                    return Ok(());
-                }
+            for (slot, value) in learned_settled.into_iter() {
+                state
+                    .settled_decisions
+                    .insert(slot, Arc::from(value.clone()));
+                tx.send(Decided { value: value })
+                    .await
+                    .map_err(LinkError::with_action("send decided indication"))?
             }
 
-            for (slot, decision) in learned_decisions.into_iter() {
-                state.settled_decisions.insert(slot, Arc::from(decision));
+            for (slot, decision) in open_decisions.into_iter() {
+                match state.open_decisions.get_mut(&slot) {
+                    Some(v) => {
+                        if v.id <= decision.id {
+                            if v.id < decision.id {
+                                v.id = decision.id;
+                                v.value = Arc::from(decision.value);
+                                v.accepted_by.clear();
+                            }
+                            v.accepted_by = v
+                                .accepted_by
+                                .union(&decision.accepted_by)
+                                .copied()
+                                .collect();
+                        }
+                    }
+                    None => {
+                        state.open_decisions.insert(
+                            slot,
+                            LearnedValue {
+                                id: decision.id,
+                                value: Arc::from(decision.value),
+                                accepted_by: decision.accepted_by,
+                            },
+                        );
+                    }
+                };
             }
 
-            let open_proposal = state.sent_proposal.as_mut().unwrap();
-            open_proposal.acks.insert(sender);
+            let max_settled = state
+                .settled_decisions
+                .iter()
+                .map(|(s, _)| *s)
+                .max()
+                .unwrap_or(0);
 
-            if open_proposal.acks.len() > self.number_of_nodes / 2 {
+            let max_open = state
+                .open_decisions
+                .iter()
+                .map(|(s, _)| *s)
+                .max()
+                .unwrap_or(0);
+
+            state.current_slot = max_settled.max(max_open);
+
+            let sent_slot = state.sent_proposal.as_ref().unwrap().slot_value.slot;
+            let mut value_override = None;
+
+            if let Some(v) = state.settled_decisions.get(&sent_slot) {
+                value_override = Some(Arc::clone(v));
+            } else if let Some(v) = state.open_decisions.get(&sent_slot) {
+                value_override = Some(Arc::clone(&v.value));
+            }
+
+            let sent_proposal = state.sent_proposal.as_mut().unwrap();
+            if let Some(v) = value_override {
+                sent_proposal.slot_value.value = v;
+            }
+
+            sent_proposal.acks.insert(sender);
+
+            if sent_proposal.acks.len() > self.number_of_nodes / 2 {
                 let proposal_ref = Commit {
                     id: ack_id,
                     proposal: SlotValue {
-                        slot: open_proposal.slot_value.slot,
-                        value: &open_proposal.slot_value.value,
+                        slot: sent_proposal.slot_value.slot,
+                        value: &sent_proposal.slot_value.value,
                     },
                 };
                 broadcast = Some(marshal(proposal_ref)?);
-                acceptors = Some(open_proposal.acks.clone());
+                acceptors = Some(sent_proposal.acks.clone());
             }
         }
 
@@ -409,7 +511,8 @@ where
 
             let ack = PaxosMessage::<Arc<T>>::Ack {
                 id: received_id,
-                decisions: state.settled_decisions.clone(),
+                settled_decisions: state.settled_decisions.clone(),
+                open_decisions: state.open_decisions.clone(),
             };
             marshal(ack)?
         };
@@ -454,6 +557,11 @@ where
             Some(rx) => rx,
         };
 
+        let tx = match self.indications_tx2.lock().await.take() {
+            Some(tx) => tx,
+            None => return Err(LinkError::InternalError("take indications tx2".to_owned())),
+        };
+
         while let Some(delivery) = indications.recv().await {
             let message: PaxosMessage<T> = match unmarshal(delivery.message) {
                 Ok(m) => m,
@@ -465,8 +573,14 @@ where
 
             if let Commit { id, proposal } = message {
                 self.on_commit(delivery.sender, id, proposal).await?
-            } else if let Ack { id, decisions } = message {
-                self.on_ack(delivery.sender, id, decisions).await?
+            } else if let Ack {
+                id,
+                settled_decisions,
+                open_decisions,
+            } = message
+            {
+                self.on_ack(delivery.sender, id, settled_decisions, open_decisions)
+                    .await?
             }
         }
         Ok(())
