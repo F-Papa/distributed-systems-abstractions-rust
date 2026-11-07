@@ -112,7 +112,7 @@ where
                 }
                 state.acks.clear();
 
-                let new_proposal_id = get_id(self.number_of_nodes, self.local_id.get() as usize);
+                let new_proposal_id = get_id(self.local_id.get() as usize, self.number_of_nodes);
                 state.proposal = Some(Proposal {
                     id: new_proposal_id,
                     value: value.clone(),
@@ -146,160 +146,143 @@ where
         Ok(())
     }
 
-    async fn handle_accepted(
+    async fn on_accepted(
         &self,
         sender: NodeId,
         tx: &mpsc::Sender<Decided<T>>,
-        accepted: &PaxosMessage<T>,
+        id: usize,
+        value: T,
     ) -> Result<(), LinkError> {
-        if let Accepted(Proposal { id, value }) = accepted {
+        let mut state = self.state.lock().await;
+        let entry = state.acceptances.entry(id).or_insert((
+            0,
+            Proposal {
+                id: id,
+                value: value.clone(),
+            },
+        ));
+
+        entry.0 += 1;
+        let entry = (entry.0, entry.1.clone());
+
+        debug!("received accept from {sender}. Entry: {:?}", entry);
+        if let None = state.decided
+            && entry.0 > self.number_of_nodes / 2
+        {
+            state.decided = Some(entry.1.clone());
+            tx.send(Decided {
+                value: entry.1.value,
+            })
+            .await
+            .map_err(LinkError::with_action("send decided indication"))?
+        }
+        Ok(())
+    }
+
+    async fn on_commit(&self, sender: NodeId, id: usize, value: T) -> Result<(), LinkError> {
+        let response = {
+            let state = self.state.lock().await;
+            match state.promise.as_ref() {
+                Some(Promise {
+                    id: promised_id,
+                    accepted,
+                }) if *promised_id == id => {
+                    debug!(
+                        "accepting: {:?} from {sender}. Promised: {:?}",
+                        id, state.promise
+                    );
+                    Some(marshal(&Accepted(Proposal { id: id, value }))?)
+                }
+                _ => {
+                    debug!(
+                        "ignoring: {:?} from {sender}. Promised: {:?}",
+                        id, state.promise
+                    );
+                    None
+                }
+            }
+        };
+
+        if let Some(response) = response {
+            self.broadcast.broadcast(&response).await?
+        }
+        Ok(())
+    }
+    async fn on_promise(
+        &self,
+        sender: NodeId,
+        id: usize,
+        accepted: Option<T>,
+    ) -> Result<(), LinkError> {
+        let mut acceptors: Option<HashSet<NodeId>> = None;
+        let mut broadcast: Option<PaxosMessage<T>> = None;
+        {
             let mut state = self.state.lock().await;
-            let entry = state.acceptances.entry(*id).or_insert((
-                0,
-                Proposal {
-                    id: *id,
+            if let Some(proposal) = &state.proposal
+                && id == proposal.id
+            {
+                let value = accepted.as_ref().unwrap_or(&proposal.value).clone();
+                state.proposal = Some(Proposal {
+                    id,
                     value: value.clone(),
-                },
-            ));
+                });
+                state.acks.insert(sender);
 
-            entry.0 += 1;
-            let entry = (entry.0, entry.1.clone());
+                if state.acks.len() > self.number_of_nodes / 2 {
+                    broadcast = Some(Commit(Proposal { id, value }));
+                    acceptors = Some(state.acks.clone());
+                }
+            };
+        }
 
-            debug!("received accept from {sender}. Entry: {:?}", entry);
-            if let None = state.decided
-                && entry.0 > self.number_of_nodes / 2
-            {
-                state.decided = Some(entry.1.clone());
-                tx.send(Decided {
-                    value: entry.1.value,
-                })
-                .await
-                .map_err(LinkError::with_action("send decided indication"))?
+        if let Some(mut acceptors) = acceptors {
+            let broadcast = broadcast.unwrap();
+            debug!(
+                "received {} promises. sending: {:?}",
+                acceptors.len(),
+                broadcast
+            );
+            let broadcast = marshal(broadcast)?;
+            for id in acceptors.drain() {
+                self.link.send(&broadcast, id).await?;
             }
         }
         Ok(())
     }
 
-    async fn handle_commit(
-        &self,
-        sender: NodeId,
-        commit: &PaxosMessage<T>,
-    ) -> Result<(), LinkError> {
-        if let Commit(Proposal { id, value }) = commit {
-            let response = {
-                let state = self.state.lock().await;
-                match state.promise.as_ref() {
-                    Some(Promise {
-                        id: promised_id,
-                        accepted,
-                    }) if promised_id == id => {
-                        debug!(
-                            "accepting: {:?} from {sender}. Promised: {:?}",
-                            commit, state.promise
-                        );
-                        Some(marshal(&Accepted(Proposal { id: *id, value }))?)
-                    }
-                    _ => {
-                        debug!(
-                            "ignoring: {:?} from {sender}. Promised: {:?}",
-                            commit, state.promise
-                        );
-                        None
-                    }
+    async fn on_prepare(&self, sender: NodeId, id: usize) -> Result<(), LinkError> {
+        let response: Option<PaxosMessage<T>> = {
+            let mut state = self.state.lock().await;
+            match state.promise.as_ref() {
+                Some(Promise {
+                    id: promised_id,
+                    accepted,
+                }) if *promised_id > id => {
+                    // Promised higher id, ignore
+                    debug!(
+                        "ignoring: {:?} from {sender}. Promised: {id}",
+                        state.promise
+                    );
+                    None
                 }
-            };
+                _ => {
+                    // Save promise
+                    debug!("promising: {:?} to {sender}. Promised: {id}", state.promise);
 
-            if let Some(response) = response {
-                self.broadcast.broadcast(&response).await?
+                    let promise = Promise::<T> {
+                        id,
+                        accepted: promised_value(&state.promise),
+                    };
+
+                    state.promise = Some(promise.clone());
+                    Some(promise)
+                }
             }
         };
-        Ok(())
-    }
-    async fn handle_promise(
-        &self,
-        sender: NodeId,
-        promise: &PaxosMessage<T>,
-    ) -> Result<(), LinkError> {
-        if let Promise { id, accepted } = promise {
-            let mut acceptors: Option<HashSet<NodeId>> = None;
-            let mut broadcast: Option<PaxosMessage<T>> = None;
-            {
-                let mut state = self.state.lock().await;
-                if let Some(proposal) = &state.proposal
-                    && *id == proposal.id
-                {
-                    let value = accepted.as_ref().unwrap_or(&proposal.value).clone();
-                    state.proposal = Some(Proposal {
-                        id: *id,
-                        value: value.clone(),
-                    });
-                    state.acks.insert(sender);
 
-                    if state.acks.len() > self.number_of_nodes / 2 {
-                        broadcast = Some(Commit(Proposal { id: *id, value }));
-                        acceptors = Some(state.acks.clone());
-                    }
-                };
-            }
-
-            if let Some(mut acceptors) = acceptors {
-                let broadcast = broadcast.unwrap();
-                debug!(
-                    "received {} promises. sending: {:?}",
-                    acceptors.len(),
-                    broadcast
-                );
-                let broadcast = marshal(broadcast)?;
-                for id in acceptors.drain() {
-                    self.link.send(&broadcast, id).await?;
-                }
-            }
+        if let Some(response) = response {
+            self.link.send(&marshal(response)?, sender).await?
         }
-        Ok(())
-    }
-
-    async fn handle_prepare(
-        &self,
-        sender: NodeId,
-        prepare: &PaxosMessage<T>,
-    ) -> Result<(), LinkError> {
-        if let Prepare { id } = prepare {
-            let response: Option<PaxosMessage<T>> = {
-                let mut state = self.state.lock().await;
-                match state.promise.as_ref() {
-                    Some(Promise {
-                        id: promised_id,
-                        accepted,
-                    }) if promised_id > id => {
-                        // Promised higher id, ignore
-                        debug!(
-                            "ignoring: {:?} from {sender}. Promised: {:?}",
-                            prepare, state.promise
-                        );
-                        None
-                    }
-                    _ => {
-                        // Save promise
-                        debug!(
-                            "promising: {:?} to {sender}. Promised: {:?}",
-                            prepare, state.promise
-                        );
-
-                        let promise = Promise::<T> {
-                            id: *id,
-                            accepted: promised_value(&state.promise),
-                        };
-
-                        state.promise = Some(promise.clone());
-                        Some(promise)
-                    }
-                }
-            };
-
-            if let Some(response) = response {
-                self.link.send(&marshal(response)?, sender).await?
-            }
-        };
         Ok(())
     }
 
@@ -323,10 +306,11 @@ where
                 }
             };
 
-            if matches!(message, Prepare { .. }) {
-                self.handle_prepare(delivery.sender, &message).await?;
-            } else if matches!(message, Accepted(..)) {
-                self.handle_accepted(delivery.sender, &tx, &message).await?;
+            if let Prepare { id } = message {
+                self.on_prepare(delivery.sender, id).await?;
+            } else if let Accepted(proposal) = message {
+                self.on_accepted(delivery.sender, &tx, proposal.id, proposal.value)
+                    .await?;
             }
         }
         Ok(())
@@ -347,10 +331,10 @@ where
                 }
             };
 
-            if matches!(message, Commit { .. }) {
-                self.handle_commit(delivery.sender, &message).await?
-            } else if matches!(message, Promise { .. }) {
-                self.handle_promise(delivery.sender, &message).await?
+            if let Commit(Proposal { id, value }) = message {
+                self.on_commit(delivery.sender, id, value).await?
+            } else if let Promise { id, accepted } = message {
+                self.on_promise(delivery.sender, id, accepted).await?
             }
         }
         Ok(())
