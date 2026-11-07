@@ -29,25 +29,21 @@ struct Proposal<T> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum PaxosMessage<T> {
-    Prepare { id: usize },
-    Promise { id: usize, accepted: Option<T> },
+    Prepare {
+        id: usize,
+    },
+    Promise {
+        id: usize,
+        accepted: Option<Proposal<T>>,
+    },
     Commit(Proposal<T>),
     Accepted(Proposal<T>),
 }
 
-fn promised_value<T>(promise: &Option<PaxosMessage<T>>) -> Option<T>
-where
-    T: Clone,
-{
-    match promise {
-        Some(Promise { id: _, accepted }) => accepted.clone(),
-        _ => None,
-    }
-}
 struct State<T> {
-    promise: Option<PaxosMessage<T>>,
+    promise: Option<Proposal<Option<T>>>,
     proposal: Option<Proposal<T>>,
-    acks: HashSet<NodeId>,
+    acks: HashMap<NodeId, Option<Proposal<T>>>,
     acceptances: HashMap<usize, (usize, Proposal<T>)>,
     decided: Option<Proposal<T>>,
 }
@@ -88,7 +84,7 @@ where
                 acceptances: HashMap::new(),
                 proposal: None,
                 promise: None,
-                acks: HashSet::new(),
+                acks: HashMap::new(),
             }),
             indications: Arc::from(Mutex::from(Some(rx))),
             indications_tx: Mutex::from(Some(tx)),
@@ -107,7 +103,7 @@ where
         loop {
             let broadcast = {
                 let mut state = self.state.lock().await;
-                if state.acks.len() >= self.number_of_nodes / 2 {
+                if state.acks.len() > self.number_of_nodes / 2 {
                     return Ok(());
                 }
                 state.acks.clear();
@@ -181,30 +177,27 @@ where
 
     async fn on_commit(&self, sender: NodeId, id: usize, value: T) -> Result<(), LinkError> {
         let response = {
-            let state = self.state.lock().await;
-            match state.promise.as_ref() {
-                Some(Promise {
-                    id: promised_id,
-                    accepted,
-                }) if *promised_id == id => {
-                    debug!(
-                        "accepting: {:?} from {sender}. Promised: {:?}",
-                        id, state.promise
-                    );
-                    Some(marshal(&Accepted(Proposal { id: id, value }))?)
-                }
-                _ => {
-                    debug!(
-                        "ignoring: {:?} from {sender}. Promised: {:?}",
-                        id, state.promise
-                    );
-                    None
-                }
+            let mut state = self.state.lock().await;
+            if let Some(promise) = state.promise.as_mut()
+                && promise.id == id
+            {
+                debug!(
+                    "accepting: ({:?}, {:?}) from {sender}. Promised: {:?}",
+                    id, value, promise
+                );
+                promise.value = Some(value);
+                Some(Accepted(promise.clone()))
+            } else {
+                debug!(
+                    "ignoring: {:?} from {sender}. Promised: {:?}",
+                    id, state.promise
+                );
+                None
             }
         };
 
         if let Some(response) = response {
-            self.broadcast.broadcast(&response).await?
+            self.broadcast.broadcast(&marshal(response)?).await?
         }
         Ok(())
     }
@@ -212,78 +205,81 @@ where
         &self,
         sender: NodeId,
         id: usize,
-        accepted: Option<T>,
+        accepted: Option<Proposal<T>>,
     ) -> Result<(), LinkError> {
-        let mut acceptors: Option<HashSet<NodeId>> = None;
-        let mut broadcast: Option<PaxosMessage<T>> = None;
         {
             let mut state = self.state.lock().await;
-            if let Some(proposal) = &state.proposal
+            if let Some(proposal) = state.proposal.as_mut()
                 && id == proposal.id
             {
-                let value = accepted.as_ref().unwrap_or(&proposal.value).clone();
-                state.proposal = Some(Proposal {
-                    id,
-                    value: value.clone(),
-                });
-                state.acks.insert(sender);
-
-                if state.acks.len() > self.number_of_nodes / 2 {
-                    broadcast = Some(Commit(Proposal { id, value }));
-                    acceptors = Some(state.acks.clone());
-                }
+                state.acks.insert(sender, accepted);
+            } else {
+                return Ok(());
             };
         }
+        let proposal;
+        let mut acceptors: HashSet<NodeId>;
 
-        if let Some(mut acceptors) = acceptors {
-            let broadcast = broadcast.unwrap();
-            debug!(
-                "received {} promises. sending: {:?}",
-                acceptors.len(),
-                broadcast
-            );
-            let broadcast = marshal(broadcast)?;
-            for id in acceptors.drain() {
-                self.link.send(&broadcast, id).await?;
+        let value = {
+            let state = self.state.lock().await;
+            if state.acks.len() <= self.number_of_nodes / 2 {
+                return Ok(());
             }
+
+            proposal = state.proposal.clone();
+            acceptors = state.acks.keys().copied().collect();
+            state
+                .acks
+                .iter()
+                .filter(|(_, p)| p.is_some())
+                .max_by_key(|(_, p)| p.as_ref().clone().unwrap().id)
+                .map(|(_, p)| p.clone().unwrap().value)
+                .unwrap_or(proposal.unwrap().value)
+        };
+
+        let commit = marshal(&Commit(Proposal { id, value }))?;
+        debug!(
+            "received {} promises. sending: {:?}",
+            acceptors.len(),
+            commit
+        );
+        for id in acceptors.drain() {
+            self.link.send(&commit, id).await?;
         }
         Ok(())
     }
 
     async fn on_prepare(&self, sender: NodeId, id: usize) -> Result<(), LinkError> {
-        let response: Option<PaxosMessage<T>> = {
+        let promise: PaxosMessage<T> = {
             let mut state = self.state.lock().await;
-            match state.promise.as_ref() {
-                Some(Promise {
-                    id: promised_id,
-                    accepted,
-                }) if *promised_id > id => {
-                    // Promised higher id, ignore
+            if let Some(promise) = state.promise.as_mut() {
+                if promise.id > id {
                     debug!(
                         "ignoring: {:?} from {sender}. Promised: {id}",
                         state.promise
                     );
-                    None
+                    return Ok(());
                 }
-                _ => {
-                    // Save promise
-                    debug!("promising: {:?} to {sender}. Promised: {id}", state.promise);
 
-                    let promise = Promise::<T> {
-                        id,
-                        accepted: promised_value(&state.promise),
-                    };
+                let accepted = match &promise.value {
+                    Some(v) => Some(Proposal {
+                        id: promise.id,
+                        value: v.clone(),
+                    }),
+                    None => None,
+                };
 
-                    state.promise = Some(promise.clone());
-                    Some(promise)
-                }
+                promise.id = id;
+                Promise { id, accepted }
+            } else {
+                state.promise = Some(Proposal { id, value: None });
+                Promise { id, accepted: None }
             }
         };
 
-        if let Some(response) = response {
-            self.link.send(&marshal(response)?, sender).await?
-        }
-        Ok(())
+        debug!("promising: {:?} to {sender}. Promised: {id}", promise);
+        let response = marshal(&promise)?;
+        self.link.send(&response, sender).await
     }
 
     async fn handle_broadcast(&self) -> Result<(), LinkError> {
